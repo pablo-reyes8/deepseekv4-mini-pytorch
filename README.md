@@ -1,57 +1,76 @@
-# DeepSeek-V4 Mini
+<p align="center">
+  <img src="assets\header_image.png" width="1000"/>
+</p>
 
-A serious PyTorch implementation of the core ideas behind the DeepSeek-V4 architecture, scaled down for readable code, CPU-safe tests, and fast research iteration.
 
-This repository is not a toy Transformer wrapper. It implements the pieces that make the DeepSeek-V4 paper interesting as a system:
 
-- **Hybrid long-context attention** with CSA and HCA variants.
-- **DeepSeek-style MoE feed-forward layers** with routed and shared experts.
-- **mHC residual streams** for expanded residual routing.
-- **Multi-Token Prediction** auxiliary heads.
-- **Training infrastructure** for optimizer grouping, Muon/AdamW, AMP, EMA, checkpoints, module metrics, and qualitative eval previews.
-- **Reproducible configs, CI, Docker, CPU tests, and dataset loaders** suitable for a first public push.
+# DeepSeek-V4 Mini: A Paper-Faithful PyTorch Implementation
 
-The target is a compact research implementation: close enough to the paper to inspect the actual mechanics, small enough to run and test locally.
+![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
+![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=flat&logo=PyTorch&logoColor=white)
+![Status](https://img.shields.io/badge/status-active_research-orange.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-## Why This Repo Exists
+A serious, ground-up PyTorch implementation of the core ideas behind the **DeepSeek-V4** architecture. Scaled down for readable code, CPU-safe tests, and fast research iteration.
 
-DeepSeek-V4 pushes the Transformer in three directions that are worth studying independently:
+This repository is **not** a toy Transformer wrapper. It rigorously implements the pieces that make the DeepSeek-V4 paper interesting as a system, designed for researchers and engineers who want to inspect the actual mechanics without the overhead of frontier-scale infrastructure.
 
-1. Long context needs something better than naive full attention.
-2. Capacity needs sparse activation, not just dense scaling.
-3. Deep training stability needs residual and optimization machinery, not only a bigger model.
+## Index
 
-This project isolates those ideas into a mini implementation where each component can be tested, ablated, and trained on small corpora before scaling.
+- [🎯 Why This Repo Exists](#-why-this-repo-exists)
+- [Architecture Coverage](#architecture-coverage)
+- [🏗️ Repository Layout](#️-repository-layout)
+- [Installation](#installation)
+- [Run Tests](#run-tests)
+- [⚙️ Model Configs](#️-model-configs)
+- [📚 Dataset Presets](#-dataset-presets)
+- [🔬 Training A Tiny Model](#-training-a-tiny-model)
+- [Training With Batches and Indexing](#training-with-batches-and-indexing)
+- [Docker Support](#docker-support)
+- [🛠️ Command Line Tools](#️-command-line-tools)
+- [CI Strategy](#ci-strategy)
+- [Notes on Scope](#notes-on-scope)
+- [📖 References & Citation](#-references--citation)
+
+## 🎯 Why This Repo Exists
+
+DeepSeek-V4 pushes the Transformer in three directions that demand independent study:
+
+1. **Context Limits:** Long context needs something better than naive full attention.
+2. **Model Capacity:** Scaling requires sparse activation algorithms, not just dense parameter scaling.
+3. **Training Stability:** Deep training stability necessitates complex residual routing and optimization machinery, not only a bigger model.
+
+This project isolates those innovations into a mini implementation where each component can be tested, ablated, and trained on small corpora before scaling.
 
 ## Architecture Coverage
 
-| Area | Implemented |
-| --- | --- |
-| Causal Transformer baseline | token embeddings, RMSNorm, RoPE, MHA, LM head |
-| HCA | compressed KV branch, sliding window branch, causal tests |
-| CSA | compressed sparse block selection, local window, indexer, causal tests |
-| MoE | learned/hash routing, top-k experts, shared experts, balance metrics |
-| mHC | hyper-connection stream expansion, Sinkhorn mixing, modular block API |
-| MTP | auxiliary next-n-token heads and loss |
-| Training | AdamW groups, Muon+AdamW, cosine schedule, AMP, EMA, checkpoints, metrics |
-| Data | synthetic retrieval, TinyStories, WikiText-2, AG News, IMDB, MiniPile, FineWeb-Edu sample preset |
+| Area | Implementation Status |
+| :--- | :--- |
+| **Causal Transformer** | Token embeddings, RMSNorm, RoPE, MHA, LM head |
+| **HCA (Hybrid Context)**| Compressed KV branch, sliding window branch, causal tests |
+| **CSA (Compressed Sparse)**| Compressed sparse block selection, local window, indexer, causal tests |
+| **MoE (Mixture of Experts)**| Learned/hash routing, top-k experts, shared experts, balance metrics |
+| **mHC (Hyper-Connections)**| Stream expansion, Sinkhorn mixing, modular block API |
+| **MTP (Multi-Token)** | Auxiliary next-n-token heads and prediction loss |
+| **Training Engine** | AdamW groups, Muon+AdamW, cosine schedule, AMP, EMA, checkpoints, metrics |
+| **Data Pipelines** | Synthetic retrieval, TinyStories, WikiText-2, AG News, IMDB, MiniPile, FineWeb-Edu |
 
-## Repository Layout
+## 🏗️ Repository Layout
 
 ```text
-src/                  model components
-src/transformer_modules/
-training/             training loop, schedulers, optimizers, metrics, checkpoints
-data/                 dataset builders and causal LM dataloaders
-tests/                CPU-safe component tests
-tests/training/       training-stack tests
-config/               YAML experiment profiles
-.github/              path-aware CI and Dependabot
-paper/                DeepSeek-V4 paper reference
-proyect_structure/    project scope and implementation guide
+src/                  # Core model components and architecture
+src/transformer_modules/ # Isolated attention and MoE blocks
+training/             # Training loop, schedulers, optimizers, metrics, checkpoints
+data/                 # Dataset builders and causal LM dataloaders
+tests/                # CPU-safe component unit tests
+tests/training/       # Training-stack integration tests
+config/               # YAML experiment profiles
+.github/              # Path-aware CI and Dependabot configurations
+paper/                # DeepSeek-V4 paper reference
+proyect_structure/    # Project scope and implementation guide
 ```
 
-## Install
+## Installation
 
 ```bash
 python -m venv .venv
@@ -60,52 +79,43 @@ pip install --upgrade pip
 pip install -e ".[dev,data]"
 ```
 
-Minimal install:
-
+Minimal install for inference only:
 ```bash
 pip install -r requirements.txt
 ```
 
 ## Run Tests
 
-Full local CPU suite:
+The repository includes a comprehensive CPU-safe test suite. The CUDA-only checks correctly skip when no GPU is available.
 
+Full local CPU suite:
 ```bash
 pytest
 ```
 
 Training-only tests:
-
 ```bash
 pytest tests/training
 ```
 
 Dataset loader tests:
-
 ```bash
 pytest tests/data
 ```
 
-Current validation on CPU:
+*Current validation on CPU: `649 passed, 4 skipped`*
 
-```text
-649 passed, 4 skipped
-```
+## ⚙️ Model Configs
 
-The skipped tests are CUDA-only checks that correctly skip when no GPU is available.
-
-## Model Configs
-
-Start from the YAML profiles in `config/model/`:
+Start from the YAML profiles in `config/model/`. These profiles allow you to seamlessly switch between standard dense models and full DeepSeek architectures.
 
 | Config | Purpose |
-| --- | --- |
-| `deepseekv4_tiny.yaml` | CPU smoke model for CI/debugging |
-| `deepseekv4_mini.yaml` | default research model with hybrid attention + MoE + mHC + MTP |
-| `deepseekv4_csa_moe_mhc_mtp.yaml` | full-feature integration variant |
+| :--- | :--- |
+| `deepseekv4_tiny.yaml` | CPU smoke model for CI and debugging |
+| `deepseekv4_mini.yaml` | Default research model with Hybrid Attention + MoE + mHC + MTP |
+| `deepseekv4_csa_moe_mhc_mtp.yaml` | Full-feature integration variant |
 
-Typical tiny model shape:
-
+**Typical tiny model shape (`deepseekv4_tiny.yaml`):**
 ```yaml
 model:
   vocab_size: 128
@@ -116,8 +126,7 @@ model:
   ffn_type: dense
 ```
 
-Mini research profile:
-
+**Mini research profile (`deepseekv4_mini.yaml`):**
 ```yaml
 model:
   d_model: 256
@@ -131,21 +140,21 @@ model:
   use_mtp: true
 ```
 
-## Dataset Presets
+## 📚 Dataset Presets
 
-The project now supports a broader set of small-to-medium text corpora through `data/text_datasets.py`:
+The project supports a robust set of small-to-medium text corpora through `data/text_datasets.py`:
 
-| Preset | HF dataset | Use |
-| --- | --- | --- |
-| `synthetic_long_context` | local generator | retrieval stress tests for CSA/HCA |
-| `tinystories` | `roneneldan/TinyStories` | tiny LM generation and curriculum-style training |
-| `wikitext2` | `Salesforce/wikitext`, `wikitext-2-raw-v1` | classic language modeling benchmark |
-| `ag_news` | `fancyzhx/ag_news` | compact news-domain corpus |
-| `imdb` | `stanfordnlp/imdb` | longer review text and domain shift |
-| `minipile` | `JeanKaddour/minipile` | diverse small pretraining mix |
-| `fineweb_edu_10bt_mincols` | `EliMC/fineweb-edu-10BT-mincols` | educational web sample; limit documents locally |
+| Preset | HF Dataset | Primary Use Case |
+| :--- | :--- | :--- |
+| `synthetic_long_context`| Local generator | Retrieval stress tests for CSA/HCA |
+| `tinystories` | `roneneldan/TinyStories` | Tiny LM generation & curriculum training |
+| `wikitext2` | `Salesforce/wikitext` | Classic language modeling benchmark |
+| `ag_news` | `fancyzhx/ag_news` | Compact news-domain corpus |
+| `imdb` | `stanfordnlp/imdb` | Longer review text and domain shift |
+| `minipile` | `JeanKaddour/minipile` | Diverse small pretraining mix |
+| `fineweb_edu_10bt_mincols`| `EliMC/fineweb-edu-10BT` | Educational web sample (local limits) |
 
-The generic loader returns batches shaped for the training pipeline:
+The generic loader returns dict batches shaped for the training pipeline:
 
 ```python
 from data.text_datasets import create_hf_text_dataloaders
@@ -159,20 +168,17 @@ train_loader, val_loader, tokenizer = create_hf_text_dataloaders(
     max_train_documents=20_000,
     max_validation_documents=2_000,
 )
+
+# Batch structure:
+# {
+#     "input_ids": LongTensor[B, T],
+#     "labels": LongTensor[B, T],
+# }
 ```
 
-Every batch is a dict:
+## 🔬 Training A Tiny Model
 
-```python
-{
-    "input_ids": LongTensor[B, T],
-    "labels": LongTensor[B, T],
-}
-```
-
-## Training A Tiny Model
-
-The high-level API is `training.train_deepseek.train_deepseekv4`. A minimal CPU smoke run looks like:
+The high-level API is `training.train_deepseek.train_deepseekv4`. A minimal CPU smoke run looks like this:
 
 ```python
 from data.text_datasets import create_hf_text_dataloaders
@@ -222,7 +228,7 @@ history = train_deepseekv4(
 
 ## Training With Batches and Indexing
 
-For quick iteration, limit the number of documents used to build blocks:
+For quick iteration and architectural debugging, you can limit the number of documents used to build blocks:
 
 ```python
 train_loader, val_loader, tokenizer = create_hf_text_dataloaders(
@@ -241,7 +247,7 @@ for step, batch in enumerate(train_loader):
     break
 ```
 
-For component debugging, use the synthetic retrieval dataset because it exposes controlled long-range key/value dependencies:
+For component debugging, the **synthetic retrieval dataset** is highly recommended because it explicitly exposes controlled long-range key/value dependencies:
 
 ```python
 from data.syntethic_long_context_retrieval import (
@@ -259,16 +265,16 @@ cfg = SyntheticRetrievalConfig(
 train_loader, val_loader, tokenizer = create_synthetic_retrieval_dataloaders(cfg)
 ```
 
-## Docker
+## Docker Support
 
 ```bash
 docker build -t deepseekv4-mini .
 docker compose run --rm tests
 ```
 
-## Command Line Tools
+## 🛠️ Command Line Tools
 
-After installing with `pip install -e ".[dev,data]"`, the project exposes three CLIs:
+After installing with `pip install -e ".[dev,data]"`, the project exposes three transparent CLIs for immediate interaction:
 
 ```bash
 deepseekv4-data presets
@@ -278,7 +284,7 @@ deepseekv4-inspect model-summary --attention csa --ffn moe
 deepseekv4-inspect module-tests csa --quiet
 ```
 
-The same commands work without installation through Python modules:
+The same commands work natively without CLI installation through Python modules:
 
 ```bash
 python -m scripts.data_cli synthetic-inspect --block-size 32 --batch-size 2
@@ -286,28 +292,50 @@ python -m scripts.train_cli smoke --attention mha --ffn dense --max-batches 1 --
 python -m scripts.inspect_cli module-tests training --quiet
 ```
 
-These CLIs are intentionally small and transparent:
-
-- `data_cli`: list presets, inspect synthetic data, inspect/download HF text presets.
-- `train_cli`: run a tiny synthetic training smoke test with configurable attention/FFN/mHC/MTP.
-- `inspect_cli`: summarize model parameter structure and run tests by module.
+**CLI Scope:**
+- `data_cli`: List presets, inspect synthetic data, and download HF text presets.
+- `train_cli`: Run a tiny synthetic training smoke test with configurable attention/FFN/mHC/MTP.
+- `inspect_cli`: Summarize model parameter structure and execute targeted module tests.
 
 ## CI Strategy
 
-CI is path-aware:
-
-- `src/`, model tests, configs, or packaging changes run model/component tests.
-- `training/` or `tests/training/` changes run training-stack tests.
-- `data/`, `tests/data/`, or data configs run dataset loader tests.
-- All changes run a lightweight import smoke test.
-
-This keeps pull requests fast without losing coverage where it matters.
+Continuous Integration is strictly path-aware to ensure speed without losing critical coverage:
+- Changes in `src/`, configs, or packaging trigger **model & component tests**.
+- Changes in `training/` or `tests/training/` trigger **training-stack tests**.
+- Changes in `data/` or `tests/data/` trigger **dataset loader tests**.
+- *All* changes run a lightweight import smoke test.
 
 ## Notes on Scope
 
-This project aims to be a faithful mini representation of the architectural ideas, not a claim of parity with production DeepSeek-V4 weights, kernels, distributed training, tokenizer, data mixture, or frontier-scale infrastructure. The value is that the components are visible, tested, configurable, and trainable in small regimes.
+This project aims to be a faithful mini representation of the architectural ideas. It is **not** a claim of parity with production DeepSeek-V4 weights, highly-optimized custom CUDA kernels, distributed training frameworks, or data mixtures. The value lies in visibility: these components are transparent, rigorously tested, configurable, and easily trainable in small research regimes.
 
-## References
+## 📖 References & Citation
 
-- Paper copy: `paper/DeepSeek_V4.pdf`
-- Dataset cards: WikiText, TinyStories, AG News, IMDB, MiniPile, FineWeb-Edu sample on Hugging Face
+- **Paper copy:** `paper/DeepSeek_V4.pdf`
+- **Dataset cards:** WikiText, TinyStories, AG News, IMDB, MiniPile, FineWeb-Edu sample on Hugging Face
+
+
+This implementation is based on the DeepSeek-V4 technical report:
+
+```bibtex
+@misc{deepseekai2026deepseekv4,
+  author       = {{DeepSeek-AI}},
+  title        = {DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence},
+  year         = {2026},
+  howpublished = {\url{https://huggingface.co/collections/deepseek-ai/deepseek-v4}},
+  note         = {Technical report / preview paper}
+}
+```
+
+If you use this implementation or adapt its modules for your research, please consider citing:
+
+```bibtex
+@misc{reyes2026deepseekv4mini,
+  author       = {Reyes Granados, Pablo Alejandro},
+  title        = {DeepSeek-V4 Mini: A Paper-Faithful PyTorch Research Implementation},
+  year         = {2026},
+  publisher    = {GitHub},
+  journal      = {GitHub repository},
+  howpublished = {\url{https://github.com/pablo-reyes8/deepseek-v4-mini}}
+}
+```
