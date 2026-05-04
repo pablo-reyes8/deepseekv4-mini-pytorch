@@ -4,16 +4,19 @@
 
 
 
-# DeepSeek-V4 Mini: A Paper-Faithful PyTorch Implementation
+# DeepSeek-V4 Mini: A Paper-Faithful PyTorch Research Implementation
 
 ![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=flat&logo=PyTorch&logoColor=white)
 ![Status](https://img.shields.io/badge/status-active_research-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-A serious, ground-up PyTorch implementation of the core ideas behind the **DeepSeek-V4** architecture. Scaled down for readable code, CPU-safe tests, and fast research iteration.
+An unofficial, ground-up PyTorch implementation of the core architectural ideas behind **DeepSeek-V4**. The project scales the system down for readable code, CPU-safe tests, controlled ablations, and fast research iteration.
 
-This repository is **not** a toy Transformer wrapper. It rigorously implements the pieces that make the DeepSeek-V4 paper interesting as a system, designed for researchers and engineers who want to inspect the actual mechanics without the overhead of frontier-scale infrastructure.
+This repository is not a toy Transformer wrapper or a production model clone. It implements the mechanisms that make the DeepSeek-V4 report technically interesting as a system: hybrid compressed attention, sparse long-context retrieval, Mixture-of-Experts routing, manifold-constrained hyper-connections, multi-token prediction, and Muon-based training.
+
+> [NOTE]
+> This project is not affiliated with DeepSeek-AI. It does not reproduce the official DeepSeek-V4 weights, training data, distributed infrastructure, or production kernels. Its goal is architectural transparency and research-oriented experimentation.
 
 ## Index
 
