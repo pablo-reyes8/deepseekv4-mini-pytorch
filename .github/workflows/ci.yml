@@ -53,6 +53,7 @@ jobs:
             inference:
               - "inference/**"
               - "tests/inference/**"
+              - "scripts/inference_cli.py"
               - "src/**"
               - "data/**"
               - "pyproject.toml"

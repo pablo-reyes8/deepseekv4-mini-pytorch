@@ -26,6 +26,7 @@ deepseekv4-data = "scripts.data_cli:main"
 deepseekv4-train = "scripts.train_cli:main"
 deepseekv4-inspect = "scripts.inspect_cli:main"
 deepseekv4-parallel = "scripts.parallel_cli:main"
+deepseekv4-infer = "scripts.inference_cli:main"
 
 [tool.setuptools]
 packages = ["src", "src.transformer_modules", "training", "data", "scripts", "parallel", "inference"]

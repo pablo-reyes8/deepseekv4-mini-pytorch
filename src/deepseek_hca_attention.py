@@ -177,6 +177,30 @@ class HCAAttention(nn.Module):
             nn.init.normal_(self.sink_k, mean=0.0, std=self.config.init_std)
             nn.init.normal_(self.sink_v, mean=0.0, std=self.config.init_std)
 
+    def project_cache_states_full(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        if x.dim() != 3:
+            raise ValueError(f"project_cache_states_full expects x [B,T,D], got {tuple(x.shape)}")
+        return {
+            "c": self.kv_proj(x),
+            "z": self.z_proj(x),
+        }
+
+    def compress_hca_block_for_cache(
+        self,
+        c_block: torch.Tensor,
+        z_block: torch.Tensor,
+        mask_block: Optional[torch.Tensor],
+        positions_block: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        del positions_block
+        compressed, _, _ = self.compressor(
+            C=c_block,
+            Z=z_block,
+            attention_mask=mask_block,
+            start_pos=0,
+        )
+        return compressed[:, 0, :]
+
     def _shape_q(self, q: torch.Tensor) -> torch.Tensor:
         B, T, _ = q.shape
         return q.view(B, T, self.n_heads, self.head_dim)

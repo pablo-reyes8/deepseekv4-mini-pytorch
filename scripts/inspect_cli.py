@@ -26,6 +26,7 @@ TEST_TARGETS = {
     "training": ["tests/training"],
     "data": ["tests/data"],
     "parallel": ["tests/parallel"],
+    "inference": ["tests/inference"],
     "all": ["tests"],
 }
 

@@ -1,6 +1,6 @@
 # CLI Reference
 
-The project exposes four command groups.
+The project exposes five command groups.
 
 After editable install:
 
@@ -8,6 +8,7 @@ After editable install:
 deepseekv4-data
 deepseekv4-train
 deepseekv4-inspect
+deepseekv4-infer
 deepseekv4-parallel
 ```
 
@@ -17,6 +18,7 @@ Without installation:
 python -m scripts.data_cli
 python -m scripts.train_cli
 python -m scripts.inspect_cli
+python -m scripts.inference_cli
 python -m scripts.parallel_cli
 ```
 
@@ -99,6 +101,36 @@ Run tests for one module group:
 python -m scripts.inspect_cli module-tests csa --quiet
 python -m scripts.inspect_cli module-tests training --quiet
 python -m scripts.inspect_cli module-tests data --quiet
+python -m scripts.inspect_cli module-tests inference --quiet
+```
+
+## Inference CLI
+
+Generate from the bundled manual checkpoint with DeepSeek caches:
+
+```bash
+python -m scripts.inference_cli generate \
+  --checkpoint outputs/deepseekv4_mini_muon_last_manual.pt \
+  --config-json outputs/deepseekv4_mini_muon_last_manual.json \
+  --prompt "key key_1 is value_7 question : what is key_1 ? answer :" \
+  --synthetic-tokenizer \
+  --cache-mode deepseek_decode \
+  --deepseek-prefill-mode parallel \
+  --max-new-tokens 16 \
+  --no-do-sample \
+  --return-cache-stats
+```
+
+Use raw token ids when no tokenizer is available:
+
+```bash
+python -m scripts.inference_cli generate \
+  --checkpoint outputs/deepseekv4_mini_muon_last_manual.pt \
+  --config-json outputs/deepseekv4_mini_muon_last_manual.json \
+  --prompt-ids 1,4,5,6 \
+  --cache-mode deepseek_decode \
+  --max-new-tokens 8 \
+  --no-do-sample
 ```
 
 ## Parallel CLI

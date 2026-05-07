@@ -29,6 +29,12 @@ The docs are intentionally practical:
 - [Metrics and Diagnostics](training/metrics.md)
 - [Checkpointing and EMA](training/checkpointing_and_ema.md)
 
+## Inference System
+
+- [Inference Overview](inference/overview.md)
+- [Inference Cache Modes](inference/cache_modes.md)
+- [HCA and CSA KV Cache Mechanics](inference/kv_cache.md)
+
 ## Configuration Reference
 
 - [Model Config Reference](config_reference/model.md)

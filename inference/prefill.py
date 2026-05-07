@@ -54,6 +54,26 @@ def prefill(
     )
     configure_cache_metadata(cache, cfg)
 
+    if cfg.cache_mode == "deepseek_decode" and cfg.deepseek_prefill_mode == "parallel":
+        if not hasattr(model, "prefill_decode_cache"):
+            raise NotImplementedError(
+                "cache_mode='deepseek_decode' with deepseek_prefill_mode='parallel' "
+                "requires model.prefill_decode_cache(...)."
+            )
+        out = model.prefill_decode_cache(
+            input_ids=input_ids,
+            cache=cache,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            inference_config=cfg,
+            return_aux=return_aux,
+        )
+        if return_aux:
+            aux = out.get("aux", {})
+            aux["cache_summary"] = out["cache"].cache_summary()
+            out["aux"] = aux
+        return out
+
     if cfg.cache_mode in {"mha_decode", "deepseek_decode"}:
         if getattr(getattr(model, "config", None), "attention_type", None) != "mha":
             if cfg.cache_mode == "mha_decode":

@@ -96,6 +96,7 @@ def test_manual_checkpoint_deepseek_decode_runs_on_cpu_without_full_forward(monk
         torch.tensor([[1, 4, 5, 6]], dtype=torch.long),
         InferenceConfig(
             cache_mode="deepseek_decode",
+            deepseek_prefill_mode="sequential_debug",
             max_new_tokens=1,
             do_sample=False,
             return_cache_stats=True,
@@ -105,5 +106,6 @@ def test_manual_checkpoint_deepseek_decode_runs_on_cpu_without_full_forward(monk
 
     assert out["sequences"].shape == (1, 5)
     assert out["cache_stats"]["deepseek_active_decode"] is True
+    assert out["cache_stats"]["cache_population"] == "layer_projection_real"
     assert out["cache_stats"]["layers_by_cache_type"] == {"CSALayerCache": 2, "HCALayerCache": 2}
     assert out["mtp_drafts"][0]["draft_confidence"] is not None

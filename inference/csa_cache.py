@@ -98,7 +98,7 @@ class CSALayerCache:
             self.pending_positions = concat_optional(self.pending_positions, position_t, dim=1)
         self.pending_mask = concat_optional(self.pending_mask, valid_mask_t.bool(), dim=1)
 
-        self.local_c = concat_optional(self.local_c, a_c_t, dim=1)
+        self.local_c = concat_optional(self.local_c, a_c_t.clone(), dim=1)
         if position_t is not None:
             self.local_positions = concat_optional(self.local_positions, position_t, dim=1)
         self.local_valid_mask = concat_optional(self.local_valid_mask, valid_mask_t.bool(), dim=1)
@@ -222,6 +222,118 @@ class CSALayerCache:
         ]:
             setattr(self, name, None)
         self.tokens_seen = 0
+
+    def build_from_full_sequence(
+        self,
+        a_c: torch.Tensor,
+        b_c: torch.Tensor,
+        a_z: torch.Tensor,
+        b_z: torch.Tensor,
+        index_a_c: torch.Tensor,
+        index_b_c: torch.Tensor,
+        index_a_z: torch.Tensor,
+        index_b_z: torch.Tensor,
+        positions: torch.Tensor,
+        valid_mask: Optional[torch.Tensor],
+        main_compressor_fn,
+        index_compressor_fn,
+        local_c: Optional[torch.Tensor] = None,
+    ) -> "CSALayerCache":
+        if a_c.dim() != 3:
+            raise ValueError("CSA full-sequence cache expects states with shape [B,T,D].")
+        for tensor in [b_c, a_z, b_z]:
+            if tensor.shape != a_c.shape:
+                raise ValueError("CSA main a/b c/z states must share shape.")
+        for tensor in [index_b_c, index_a_z, index_b_z]:
+            if tensor.shape != index_a_c.shape:
+                raise ValueError("CSA index a/b c/z states must share shape.")
+
+        B, T, _ = a_c.shape
+        if positions.shape != (B, T):
+            raise ValueError(f"positions must have shape {(B, T)}, got {tuple(positions.shape)}")
+        if valid_mask is None:
+            valid_mask = torch.ones(B, T, device=a_c.device, dtype=torch.bool)
+        else:
+            valid_mask = valid_mask.to(device=a_c.device, dtype=torch.bool)
+            if valid_mask.shape != (B, T):
+                raise ValueError(f"valid_mask must have shape {(B, T)}, got {tuple(valid_mask.shape)}")
+
+        self.reset()
+        m = max(1, int(self.compression_factor))
+        n_complete = T // m
+        comp_main = []
+        comp_index = []
+        comp_positions = []
+        comp_masks = []
+        prev_b = None
+        prev_bz = None
+        prev_ib = None
+        prev_ibz = None
+        prev_mask = None
+
+        for idx in range(n_complete):
+            start = idx * m
+            end = start + m
+            mask_block = valid_mask[:, start:end]
+            main = main_compressor_fn(
+                a_c[:, start:end],
+                prev_b,
+                mask_block,
+                current_z=a_z[:, start:end],
+                previous_z=prev_bz,
+                previous_mask=prev_mask,
+            )
+            index = index_compressor_fn(
+                index_a_c[:, start:end],
+                prev_ib,
+                mask_block,
+                current_z=index_a_z[:, start:end],
+                previous_z=prev_ibz,
+                previous_mask=prev_mask,
+            )
+            comp_main.append(main)
+            comp_index.append(index)
+            comp_positions.append(positions[:, end - 1])
+            comp_masks.append(mask_block.any(dim=1))
+
+            prev_b = b_c[:, start:end].detach()
+            prev_bz = b_z[:, start:end].detach()
+            prev_ib = index_b_c[:, start:end].detach()
+            prev_ibz = index_b_z[:, start:end].detach()
+            prev_mask = mask_block.detach()
+
+        if comp_main:
+            self.compressed_main = torch.stack(comp_main, dim=1)
+            self.compressed_index = torch.stack(comp_index, dim=1)
+            self.compressed_positions = torch.stack(comp_positions, dim=1)
+            self.compressed_valid_mask = torch.stack(comp_masks, dim=1)
+
+        self.previous_b_c = prev_b
+        self.previous_b_z = prev_bz
+        self.previous_index_b_c = prev_ib
+        self.previous_index_b_z = prev_ibz
+        self.previous_mask = prev_mask
+
+        tail_start = n_complete * m
+        if tail_start < T:
+            self.pending_a_c = a_c[:, tail_start:].detach()
+            self.pending_b_c = b_c[:, tail_start:].detach()
+            self.pending_a_z = a_z[:, tail_start:].detach()
+            self.pending_b_z = b_z[:, tail_start:].detach()
+            self.pending_index_a_c = index_a_c[:, tail_start:].detach()
+            self.pending_index_b_c = index_b_c[:, tail_start:].detach()
+            self.pending_index_a_z = index_a_z[:, tail_start:].detach()
+            self.pending_index_b_z = index_b_z[:, tail_start:].detach()
+            self.pending_positions = positions[:, tail_start:].detach()
+            self.pending_mask = valid_mask[:, tail_start:].detach()
+
+        local_source = local_c if local_c is not None else a_c
+        window = self.local_window_size or T
+        self.local_c = local_source[:, max(0, T - window) :].detach()
+        self.local_positions = positions[:, max(0, T - window) :].detach()
+        self.local_valid_mask = valid_mask[:, max(0, T - window) :].detach()
+        self.tokens_seen = int(T)
+        return self
 
     def num_tokens_seen(self) -> int:
         return int(self.tokens_seen)

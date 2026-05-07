@@ -255,6 +255,7 @@ class DeepSeekV4Block(nn.Module):
         return_aux: bool = False,
         need_weights: bool = False,
         collect_moe_aux: Optional[bool] = None,
+        cache_builder: Optional[Any] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
 
         aux: Dict[str, Any] = {}
@@ -287,6 +288,15 @@ class DeepSeekV4Block(nn.Module):
             # -------------------------
             residual = x
             x_norm = self.norm1(x)
+            if cache_builder is not None:
+                cache_builder.capture_layer_input(
+                    layer_idx=self.layer_idx,
+                    attention_type=self.attention_type,
+                    attention_module=self.attention,
+                    x_norm=x_norm,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                )
 
             attn_out, attn_aux = self._call_attention(
                 x_norm=x_norm,
@@ -363,6 +373,15 @@ class DeepSeekV4Block(nn.Module):
 
         def attn_sublayer(x_sub: torch.Tensor) -> torch.Tensor:
             x_norm = self.norm1(x_sub)
+            if cache_builder is not None:
+                cache_builder.capture_layer_input(
+                    layer_idx=self.layer_idx,
+                    attention_type=self.attention_type,
+                    attention_module=self.attention,
+                    x_norm=x_norm,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                )
 
             attn_out, attn_aux = self._call_attention(
                 x_norm=x_norm,

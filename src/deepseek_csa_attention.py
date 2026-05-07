@@ -267,6 +267,86 @@ class CSAAttention(nn.Module):
             nn.init.normal_(self.sink_k, mean=0.0, std=self.config.init_std)
             nn.init.normal_(self.sink_v, mean=0.0, std=self.config.init_std)
 
+    def project_cache_states_full(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        if x.dim() != 3:
+            raise ValueError(f"project_cache_states_full expects x [B,T,D], got {tuple(x.shape)}")
+        return {
+            "a_c": self.a_kv_proj(x),
+            "b_c": self.b_kv_proj(x),
+            "a_z": self.a_z_proj(x),
+            "b_z": self.b_z_proj(x),
+            "index_a_c": self.a_index_kv_proj(x),
+            "index_b_c": self.b_index_kv_proj(x),
+            "index_a_z": self.a_index_z_proj(x),
+            "index_b_z": self.b_index_z_proj(x),
+            "local_c": self.local_kv_proj(x) if self.local_kv_proj is not None else self.a_kv_proj(x),
+        }
+
+    def _compress_csa_block_for_cache(
+        self,
+        compressor,
+        current_a: torch.Tensor,
+        previous_b: Optional[torch.Tensor],
+        mask: Optional[torch.Tensor],
+        *,
+        current_z: Optional[torch.Tensor] = None,
+        previous_z: Optional[torch.Tensor] = None,
+        previous_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        current_z = current_z if current_z is not None else current_a
+        B = current_a.shape[0]
+
+        if previous_b is None:
+            tokens = current_a
+            scores = current_z + compressor.bias_a[: current_a.shape[1], :].to(
+                device=current_a.device,
+                dtype=current_z.dtype,
+            )[None, :, :]
+            valid = mask
+        else:
+            previous_z = previous_z if previous_z is not None else previous_b
+            a_len = current_a.shape[1]
+            b_len = previous_b.shape[1]
+            a_scores = current_z + compressor.bias_a[:a_len, :].to(
+                device=current_a.device,
+                dtype=current_z.dtype,
+            )[None, :, :]
+            b_scores = previous_z + compressor.bias_b[:b_len, :].to(
+                device=previous_b.device,
+                dtype=previous_z.dtype,
+            )[None, :, :]
+            tokens = torch.cat([current_a, previous_b], dim=1)
+            scores = torch.cat([a_scores, b_scores], dim=1)
+            valid = None
+            if mask is not None or previous_mask is not None:
+                if mask is None:
+                    mask = torch.ones(B, a_len, device=current_a.device, dtype=torch.bool)
+                if previous_mask is None:
+                    previous_mask = torch.ones(B, b_len, device=current_a.device, dtype=torch.bool)
+                valid = torch.cat([mask, previous_mask.to(device=current_a.device)], dim=1)
+
+        weights, block_valid = compressor._safe_temporal_softmax(scores=scores, valid=valid, dim=1)
+        comp = (weights * tokens).sum(dim=1)
+        return torch.where(block_valid[:, None], comp, torch.zeros_like(comp))
+
+    def compress_csa_main_block_for_cache(self, current_a, previous_b, mask, **kwargs):
+        return self._compress_csa_block_for_cache(
+            self.kv_compressor,
+            current_a,
+            previous_b,
+            mask,
+            **kwargs,
+        )
+
+    def compress_csa_index_block_for_cache(self, current_a, previous_b, mask, **kwargs):
+        return self._compress_csa_block_for_cache(
+            self.index_compressor,
+            current_a,
+            previous_b,
+            mask,
+            **kwargs,
+        )
+
     def _shape_q(self, q: torch.Tensor) -> torch.Tensor:
         B, T, _ = q.shape
         return q.view(B, T, self.n_heads, self.head_dim)

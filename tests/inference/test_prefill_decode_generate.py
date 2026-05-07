@@ -204,6 +204,7 @@ def test_deepseek_decode_hybrid_csa_hca_moe_mhc_mtp_runs_without_full_forward(mo
         ids(batch=1, seq=4),
         InferenceConfig(
             cache_mode="deepseek_decode",
+            deepseek_prefill_mode="sequential_debug",
             max_new_tokens=2,
             do_sample=False,
             return_cache_stats=True,
@@ -216,6 +217,142 @@ def test_deepseek_decode_hybrid_csa_hca_moe_mhc_mtp_runs_without_full_forward(mo
     assert out["cache_stats"]["num_csa_compressed_main_entries"] > 0
     assert out["cache_stats"]["num_hca_compressed_entries"] > 0
     assert out["mtp_drafts"][0]["is_speculative_decode"] is False
+
+
+def test_deepseek_parallel_prefill_does_not_loop_forward_decode(monkeypatch):
+    model = make_model(attention_type="hca", hca_compression_factor=2)
+    calls = {"forward_decode": 0}
+    original = model.forward_decode
+
+    def counted_forward_decode(*args, **kwargs):
+        calls["forward_decode"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model, "forward_decode", counted_forward_decode)
+    out = prefill(
+        model,
+        ids(batch=1, seq=5),
+        inference_config=InferenceConfig(
+            cache_mode="deepseek_decode",
+            deepseek_prefill_mode="parallel",
+            return_cache_stats=True,
+        ),
+        return_aux=True,
+    )
+
+    assert calls["forward_decode"] == 0
+    assert out["cache"].tokens_seen == 5
+    assert out["cache"].cache_summary()["cache_population"] == "layer_projection_real"
+
+
+def test_deepseek_sequential_debug_prefill_uses_forward_decode(monkeypatch):
+    model = make_model(attention_type="csa", compression_factor=2)
+    prompt = ids(batch=1, seq=5)
+    calls = {"forward_decode": 0}
+    original = model.forward_decode
+
+    def counted_forward_decode(*args, **kwargs):
+        calls["forward_decode"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model, "forward_decode", counted_forward_decode)
+    out = prefill(
+        model,
+        prompt,
+        inference_config=InferenceConfig(
+            cache_mode="deepseek_decode",
+            deepseek_prefill_mode="sequential_debug",
+        ),
+    )
+
+    assert calls["forward_decode"] == prompt.shape[1]
+    assert out["cache"].tokens_seen == prompt.shape[1]
+
+
+def test_hca_parallel_prefill_cache_counts_from_full_sequence():
+    model = make_model(
+        attention_type="hca",
+        hca_compression_factor=4,
+        window_size=3,
+        max_seq_len=32,
+    )
+    out = prefill(
+        model,
+        ids(batch=1, seq=17),
+        inference_config=InferenceConfig(cache_mode="deepseek_decode"),
+    )
+
+    for layer_cache in out["cache"].layer_caches:
+        assert layer_cache.compressed_kv.shape[1] == 4
+        assert layer_cache.pending_c.shape[1] == 1
+        assert layer_cache.local_c.shape[1] == 3
+        assert layer_cache.tokens_seen == 17
+
+
+def test_csa_parallel_prefill_cache_counts_from_full_sequence():
+    model = make_model(
+        attention_type="csa",
+        compression_factor=4,
+        window_size=3,
+        max_seq_len=32,
+    )
+    out = prefill(
+        model,
+        ids(batch=1, seq=17),
+        inference_config=InferenceConfig(cache_mode="deepseek_decode"),
+    )
+
+    for layer_cache in out["cache"].layer_caches:
+        assert layer_cache.compressed_main.shape[1] == 4
+        assert layer_cache.compressed_index.shape[1] == 4
+        assert layer_cache.pending_a_c.shape[1] == 1
+        assert layer_cache.local_c.shape[1] == 3
+        assert layer_cache.tokens_seen == 17
+
+
+@pytest.mark.parametrize("attention_type", ["hca", "csa"])
+def test_deepseek_parallel_prefill_decode_matches_sequential_debug(attention_type):
+    model = make_model(
+        attention_type=attention_type,
+        hca_compression_factor=2,
+        compression_factor=2,
+        max_seq_len=16,
+        n_layers=1,
+    )
+    prompt = ids(batch=1, seq=6)
+    next_token = ids(batch=1, seq=1)
+
+    parallel = prefill(
+        model,
+        prompt,
+        inference_config=InferenceConfig(
+            cache_mode="deepseek_decode",
+            deepseek_prefill_mode="parallel",
+        ),
+    )
+    sequential = prefill(
+        model,
+        prompt,
+        inference_config=InferenceConfig(
+            cache_mode="deepseek_decode",
+            deepseek_prefill_mode="sequential_debug",
+        ),
+    )
+
+    parallel_step = decode_step(
+        model,
+        next_token,
+        parallel["cache"],
+        inference_config=InferenceConfig(cache_mode="deepseek_decode"),
+    )
+    sequential_step = decode_step(
+        model,
+        next_token,
+        sequential["cache"],
+        inference_config=InferenceConfig(cache_mode="deepseek_decode"),
+    )
+
+    assert torch.allclose(parallel_step["logits"], sequential_step["logits"], atol=1e-5, rtol=1e-5)
 
 
 def test_decode_step_with_moe_mhc_and_mtp_enabled():

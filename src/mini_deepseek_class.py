@@ -385,7 +385,8 @@ class DeepSeekV4LM(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         start_pos: int = 0,
         return_aux: bool = False,
-        need_weights: bool = False) -> Dict[str, Any]:
+        need_weights: bool = False,
+        cache_builder: Optional[Any] = None) -> Dict[str, Any]:
 
 
         B, T = self._validate_input_ids(input_ids)
@@ -429,6 +430,7 @@ class DeepSeekV4LM(nn.Module):
                         return_aux=return_aux,
                         need_weights=need_weights,
                         collect_moe_aux=self.config.ffn_type == "moe",
+                        cache_builder=cache_builder,
                     )
                     block_aux_list.append(block_aux)
                 else:
@@ -441,6 +443,7 @@ class DeepSeekV4LM(nn.Module):
                         return_aux=False,
                         need_weights=False,
                         collect_moe_aux=False,
+                        cache_builder=cache_builder,
                     )
 
             if self.config.mhc_collapse_mode == "readout":
@@ -463,6 +466,7 @@ class DeepSeekV4LM(nn.Module):
                         return_aux=return_aux,
                         need_weights=need_weights,
                         collect_moe_aux=self.config.ffn_type == "moe",
+                        cache_builder=cache_builder,
                     )
                     block_aux_list.append(block_aux)
                 else:
@@ -475,6 +479,7 @@ class DeepSeekV4LM(nn.Module):
                         return_aux=False,
                         need_weights=False,
                         collect_moe_aux=False,
+                        cache_builder=cache_builder,
                     )
 
         # ----------------------------------------------------
@@ -574,6 +579,49 @@ class DeepSeekV4LM(nn.Module):
             "moe_aux_loss": moe_aux_loss,
             "hidden_states": hidden_states if return_aux else None,
             "aux": aux}
+
+    @torch.no_grad()
+    def prefill_decode_cache(
+        self,
+        input_ids: torch.Tensor,
+        cache,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        inference_config: Optional[Any] = None,
+        return_aux: bool = False,
+    ) -> Dict[str, Any]:
+        from inference.deepseek_cache_builder import DeepSeekActiveCacheBuilder
+
+        del inference_config
+        B, T = self._validate_input_ids(input_ids)
+        input_ids = input_ids.to(device=cache.device, dtype=torch.long)
+        if position_ids is None:
+            position_ids = torch.arange(T, device=cache.device, dtype=torch.long).unsqueeze(0).expand(B, T)
+        else:
+            position_ids = position_ids.to(device=cache.device, dtype=torch.long)
+        attention_mask = self._build_attention_mask(input_ids=input_ids, attention_mask=attention_mask)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device=cache.device)
+
+        builder = DeepSeekActiveCacheBuilder(cache=cache, inference_config=None)
+        outputs = self.forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            return_aux=return_aux,
+            need_weights=False,
+            cache_builder=builder,
+        )
+        cache.sequence_ids = input_ids.detach()
+        cache.attention_mask = attention_mask.detach() if attention_mask is not None else None
+        cache.tokens_seen = int(T)
+        return {
+            "logits": outputs["logits"][:, -1:, :],
+            "full_logits": outputs["logits"],
+            "hidden_states": outputs.get("hidden_states", None),
+            "cache": cache,
+            "aux": outputs.get("aux", {}) if return_aux else {},
+        }
 
     def forward_decode(
         self,

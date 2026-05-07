@@ -119,6 +119,65 @@ class HCALayerCache:
         self.local_valid_mask = crop_last(self.local_valid_mask, window_size, dim=1)
         return self
 
+    def build_from_full_sequence(
+        self,
+        c: torch.Tensor,
+        z: torch.Tensor,
+        positions: torch.Tensor,
+        valid_mask: Optional[torch.Tensor],
+        compressor_fn,
+    ) -> "HCALayerCache":
+        if c.dim() != 3 or z.shape != c.shape:
+            raise ValueError("HCA full-sequence cache expects c/z with shape [B,T,D].")
+        B, T, _ = c.shape
+        if positions.shape != (B, T):
+            raise ValueError(f"positions must have shape {(B, T)}, got {tuple(positions.shape)}")
+        if valid_mask is None:
+            valid_mask = torch.ones(B, T, device=c.device, dtype=torch.bool)
+        else:
+            valid_mask = valid_mask.to(device=c.device, dtype=torch.bool)
+            if valid_mask.shape != (B, T):
+                raise ValueError(f"valid_mask must have shape {(B, T)}, got {tuple(valid_mask.shape)}")
+
+        self.reset()
+        m = max(1, int(self.compression_factor))
+        n_complete = T // m
+        compressed = []
+        compressed_positions = []
+        compressed_masks = []
+
+        for idx in range(n_complete):
+            start = idx * m
+            end = start + m
+            block = compressor_fn(
+                c[:, start:end],
+                z[:, start:end],
+                valid_mask[:, start:end],
+                positions[:, start:end],
+            )
+            compressed.append(block)
+            compressed_positions.append(positions[:, end - 1])
+            compressed_masks.append(valid_mask[:, start:end].any(dim=1))
+
+        if compressed:
+            self.compressed_kv = torch.stack(compressed, dim=1)
+            self.compressed_positions = torch.stack(compressed_positions, dim=1)
+            self.compressed_valid_mask = torch.stack(compressed_masks, dim=1)
+
+        tail_start = n_complete * m
+        if tail_start < T:
+            self.pending_c = c[:, tail_start:].detach()
+            self.pending_z = z[:, tail_start:].detach()
+            self.pending_positions = positions[:, tail_start:].detach()
+            self.pending_mask = valid_mask[:, tail_start:].detach()
+
+        window = self.local_window_size or T
+        self.local_c = c[:, max(0, T - window) :].detach()
+        self.local_positions = positions[:, max(0, T - window) :].detach()
+        self.local_valid_mask = valid_mask[:, max(0, T - window) :].detach()
+        self.tokens_seen = int(T)
+        return self
+
     def reset(self) -> None:
         self.compressed_kv = None
         self.compressed_positions = None

@@ -22,6 +22,7 @@ This repository is not a toy Transformer wrapper or a production model clone. It
 
 - [🎯 Why This Repo Exists](#-why-this-repo-exists)
 - [Architecture Coverage](#architecture-coverage)
+- [Inference Status](#inference-status)
 - [🏗️ Repository Layout](#️-repository-layout)
 - [📘 Documentation](#-documentation)
 - [Installation](#installation)
@@ -60,6 +61,46 @@ This project isolates those innovations into a mini implementation where each co
 | **Training Engine** | AdamW groups, Muon+AdamW, cosine schedule, AMP, EMA, checkpoints, metrics |
 | **Data Pipelines** | Synthetic retrieval, TinyStories, WikiText-2, AG News, IMDB, MiniPile, FineWeb-Edu |
 
+## Inference Status
+
+The repo now includes a complete pure-PyTorch inference path for the mini DeepSeek stack. It supports text prompts through a tokenizer, token-id prompts for debugging, greedy/sampling generation, MTP draft diagnostics, and three explicit cache modes: `audit`, `mha_decode`, and `deepseek_decode`.
+
+The main DeepSeek path is:
+
+```python
+from inference import inference_autoregresive
+
+out = inference_autoregresive(
+    model=model,
+    prompt="key key_1 is value_7 question : what is key_1 ? answer :",
+    tokenizer=tokenizer,
+    cache_mode="deepseek_decode",
+    deepseek_prefill_mode="parallel",
+    max_new_tokens=32,
+    do_sample=False,
+    return_cache_stats=True,
+)
+```
+
+`deepseek_decode` builds real HCA/CSA layer caches. In `parallel` prefill mode, the prompt is processed once, each block captures its normalized attention input, and the HCA/CSA caches are populated with compressed global entries, pending tails, and local windows. Future tokens decode one at a time from that cache.
+
+Console generation uses the same wrapper:
+
+```bash
+python -m scripts.inference_cli generate \
+  --checkpoint outputs/deepseekv4_mini_muon_last_manual.pt \
+  --config-json outputs/deepseekv4_mini_muon_last_manual.json \
+  --prompt "key key_1 is value_7 question : what is key_1 ? answer :" \
+  --synthetic-tokenizer \
+  --cache-mode deepseek_decode \
+  --deepseek-prefill-mode parallel \
+  --max-new-tokens 16 \
+  --no-do-sample \
+  --return-cache-stats
+```
+
+See [Inference Overview](docs/inference/overview.md), [Cache Modes](docs/inference/cache_modes.md), and [HCA/CSA KV Cache Mechanics](docs/inference/kv_cache.md).
+
 ## 🏗️ Repository Layout
 
 ```text
@@ -96,6 +137,16 @@ This project isolates those innovations into a mini implementation where each co
 │   ├── chekpoints.py               # checkpoint save/load utilities
 │   └── *_metrics.py                # LM, MoE, mHC, MTP, and module diagnostics
 │
+├── inference/                      # generation, sampling, active decode, and cache implementations
+│   ├── inference_config.py         # generation and cache-mode configuration
+│   ├── prefill.py                  # audit, MHA, and DeepSeek prefill paths
+│   ├── decode.py                   # one-token decode step and cache metadata
+│   ├── hca_cache.py                # HCA compressed/global/local cache state
+│   ├── csa_cache.py                # CSA main/index/local cache state
+│   ├── deepseek_cache_builder.py   # full-prompt cache construction from layer inputs
+│   ├── generate.py                 # autoregressive generation loop
+│   └── audit.py                    # high-level audit wrapper and logit comparison
+│
 ├── parallel/                       # PyTorch-native educational parallelism
 │   ├── parallel_config.py          # DDP/model-parallel configuration object
 │   ├── parallel_utils.py           # rank helpers, seeding, device moves, metric reduction
@@ -107,6 +158,7 @@ This project isolates those innovations into a mini implementation where each co
 │   ├── data_cli.py                 # list, download, tokenize, and inspect datasets
 │   ├── train_cli.py                # tiny synthetic training smoke runs
 │   ├── inspect_cli.py              # model summaries and module-level test runner
+│   ├── inference_cli.py            # checkpoint loading and text generation with KV caches
 │   └── parallel_cli.py             # DDP/model-parallel smoke tests and placement plans
 │
 ├── docs/                           # architecture and configuration reference
@@ -121,6 +173,7 @@ This project isolates those innovations into a mini implementation where each co
 │   ├── data/                       # dataset preset and causal text loader tests
 │   ├── training/                   # optimizer, scheduler, batch, and tiny-training tests
 │   ├── parallel/                   # DDP/model-parallel CPU smoke and utility tests
+│   ├── inference/                  # generation, sampling, MTP draft, and active-cache tests
 │   ├── test_csa.py                 # CSA shape, causality, and gradient checks
 │   ├── test_hca.py                 # HCA compression/local-window checks
 │
@@ -146,6 +199,9 @@ Recommended entry points:
 - [MoE and Dense FFN](docs/architecture/moe_and_ffn.md)
 - [mHC Residual Streams](docs/architecture/mhc.md)
 - [MTP Auxiliary Prediction](docs/architecture/mtp.md)
+- [Inference Overview](docs/inference/overview.md)
+- [Inference Cache Modes](docs/inference/cache_modes.md)
+- [HCA/CSA KV Cache Mechanics](docs/inference/kv_cache.md)
 - [Training Pipeline](docs/training/pipeline.md)
 - [Muon Optimizer](docs/training/muon.md)
 - [Metrics and Diagnostics](docs/training/metrics.md)
@@ -188,7 +244,7 @@ Dataset loader tests:
 pytest tests/data
 ```
 
-*Current validation on CPU: `655 passed, 4 skipped`*
+*Current validation on CPU: `749 passed, 4 skipped`*
 
 ## ⚙️ Model Configs
 
