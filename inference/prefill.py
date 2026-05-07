@@ -9,6 +9,7 @@ from inference.cache_utils import (
     resolve_cache_dtype,
     resolve_device,
 )
+from inference.decode import configure_cache_metadata
 from inference.decode import update_cache_with_token
 from inference.hybrid_cache import DeepSeekV4InferenceCache, build_inference_cache
 from inference.inference_config import InferenceConfig
@@ -51,6 +52,39 @@ def prefill(
         dtype=cache_dtype,
         local_window_size=cfg.local_window_size,
     )
+    configure_cache_metadata(cache, cfg)
+
+    if cfg.cache_mode in {"mha_decode", "deepseek_decode"}:
+        if getattr(getattr(model, "config", None), "attention_type", None) != "mha":
+            if cfg.cache_mode == "mha_decode":
+                raise NotImplementedError("cache_mode='mha_decode' only supports attention_type='mha'.")
+        logits_steps = []
+        hidden_states = None
+        aux = {}
+        for idx in range(seq_len):
+            mask_t = attention_mask[:, idx : idx + 1] if attention_mask is not None else None
+            out = model.forward_decode(
+                input_ids_t=input_ids[:, idx : idx + 1],
+                cache=cache,
+                position_ids_t=position_ids[:, idx : idx + 1],
+                attention_mask_t=mask_t,
+                return_aux=return_aux,
+            )
+            cache = out["cache"]
+            logits_steps.append(out["logits"])
+            hidden_states = out.get("hidden_states")
+            aux = out.get("aux", {})
+
+        full_logits = torch.cat(logits_steps, dim=1)
+        if return_aux:
+            aux["cache_summary"] = cache.cache_summary()
+        return {
+            "logits": full_logits[:, -1:, :],
+            "full_logits": full_logits,
+            "hidden_states": hidden_states,
+            "cache": cache,
+            "aux": aux if return_aux else {},
+        }
 
     for idx in range(seq_len):
         mask_t = attention_mask[:, idx : idx + 1] if attention_mask is not None else None

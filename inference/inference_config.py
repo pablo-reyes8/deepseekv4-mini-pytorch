@@ -9,6 +9,7 @@ class InferenceConfig:
     max_new_tokens: int = 128
 
     use_cache: bool = True
+    cache_mode: str = "audit"
     cache_dtype: str = "fp32"
     device: str = "auto"
 
@@ -23,6 +24,9 @@ class InferenceConfig:
     pad_token_id: Optional[int] = None
 
     # Cache behavior
+    deepseek_prefill_mode: str = "parallel"
+    deepseek_cache_population: str = "layer_projection_real"
+    validate_deepseek_cache_equivalence: bool = False
     local_window_size: Optional[int] = None
     max_cache_length: Optional[int] = None
     compress_on_block_ready: bool = True
@@ -61,6 +65,25 @@ class InferenceConfig:
 
         if self.cache_dtype not in {"fp32", "bf16", "fp16"}:
             raise ValueError(f"cache_dtype must be one of {{'fp32','bf16','fp16'}}, got {self.cache_dtype}")
+
+        if self.cache_mode not in {"audit", "mha_decode", "deepseek_decode"}:
+            raise ValueError(
+                "cache_mode must be one of {'audit','mha_decode','deepseek_decode'}, "
+                f"got {self.cache_mode!r}"
+            )
+
+        if self.deepseek_prefill_mode not in {"parallel", "sequential_debug"}:
+            raise ValueError(
+                "deepseek_prefill_mode must be one of {'parallel','sequential_debug'}, "
+                f"got {self.deepseek_prefill_mode!r}"
+            )
+
+        if self.deepseek_cache_population not in {"layer_projection_real", "embedding_proxy_debug"}:
+            raise ValueError(
+                "deepseek_cache_population must be one of "
+                "{'layer_projection_real','embedding_proxy_debug'}, "
+                f"got {self.deepseek_cache_population!r}"
+            )
 
         if self.local_window_size is not None and self.local_window_size <= 0:
             raise ValueError(

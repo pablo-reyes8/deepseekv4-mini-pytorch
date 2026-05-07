@@ -112,6 +112,14 @@ class DeepSeekV4InferenceCache:
             "sequence_length": 0 if self.sequence_ids is None else int(self.sequence_ids.shape[1]),
             "device": str(self.device),
             "dtype": str(self.dtype).replace("torch.", ""),
+            "cache_mode": self.metadata.get("cache_mode", "unknown"),
+            "active_decode": bool(self.metadata.get("active_decode", False)),
+            "logits_from_cache": bool(self.metadata.get("logits_from_cache", False)),
+            "cache_population": self.metadata.get("cache_population", "unknown"),
+            "deepseek_active_decode": bool(
+                self.metadata.get("cache_mode") == "deepseek_decode"
+                and self.metadata.get("logits_from_cache", False)
+            ),
             "num_layers": len(self.layer_caches),
             "layers_by_cache_type": by_type,
             "cache_memory_bytes": self.memory_bytes(),
@@ -120,6 +128,11 @@ class DeepSeekV4InferenceCache:
             "num_compressed_entries_csa": compressed_csa,
             "num_pending_tokens_hca": pending_hca,
             "num_pending_tokens_csa": pending_csa,
+            "num_hca_compressed_entries": compressed_hca,
+            "num_csa_compressed_main_entries": compressed_csa,
+            "num_csa_compressed_index_entries": compressed_csa,
+            "num_hca_pending_tokens": pending_hca,
+            "num_csa_pending_tokens": pending_csa,
             "local_window_size": max(local_windows) if local_windows else 0,
         }
 
@@ -165,4 +178,10 @@ def build_inference_cache(
         batch_size=batch_size,
         device=device,
         dtype=cache_dtype,
+        metadata={
+            "cache_mode": "unconfigured",
+            "active_decode": False,
+            "logits_from_cache": False,
+            "cache_population": "unconfigured",
+        },
     )

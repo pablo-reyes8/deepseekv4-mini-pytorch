@@ -467,3 +467,61 @@ class CausalMultiHeadAttention(nn.Module):
             return out, attn_weights
 
         return out
+
+    def forward_decode(
+        self,
+        x_t: torch.Tensor,
+        cache,
+        position_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = False,
+    ):
+        if x_t.dim() != 3 or x_t.shape[1] != 1:
+            raise ValueError(f"forward_decode expects x_t [B,1,D], got {tuple(x_t.shape)}")
+
+        B, T, C = x_t.shape
+        if C != self.d_model:
+            raise ValueError(f"Expected hidden size {self.d_model}, got {C}")
+
+        q = self._shape_projection(self.q_proj(x_t))
+        k = self._shape_projection(self.k_proj(x_t))
+        v = self._shape_projection(self.v_proj(x_t))
+
+        if self.rope is not None:
+            q = self.rope(q, position_ids=position_ids)
+            k = self.rope(k, position_ids=position_ids)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        cache.append(k, v, position_ids)
+        k_all, v_all = cache.get_kv()
+
+        attn_scores = torch.matmul(q, k_all.transpose(-2, -1))
+        attn_scores = attn_scores / math.sqrt(self.head_dim)
+
+        if attention_mask is not None:
+            if attention_mask.dim() != 2 or attention_mask.shape[0] != B:
+                raise ValueError(
+                    "decode attention_mask must have shape [B,T_cache], "
+                    f"got {tuple(attention_mask.shape)}"
+                )
+            key_padding_mask = attention_mask[:, None, None, :].to(
+                device=x_t.device,
+                dtype=torch.bool,
+            )
+            attn_scores = attn_scores.masked_fill(
+                ~key_padding_mask,
+                torch.finfo(attn_scores.dtype).min,
+            )
+
+        attn_weights = F.softmax(attn_scores.float(), dim=-1).to(dtype=attn_scores.dtype)
+        attn_weights = self.attention_dropout(attn_weights)
+        context = torch.matmul(attn_weights, v_all)
+        context = context.transpose(1, 2).contiguous().view(B, T, self.inner_dim)
+        out = self.out_proj(context)
+        out = self.residual_dropout(out)
+
+        aux = {"attn_weights": attn_weights} if need_weights else {}
+        return out, cache, aux

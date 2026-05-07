@@ -97,6 +97,10 @@ def test_hybrid_cache_tokens_to_memory_summary_and_to():
     assert summary["tokens_seen"] == 1
     assert summary["cache_memory_mb"] >= 0
     assert "layers_by_cache_type" in summary
+    assert summary["cache_mode"] == "audit"
+    assert summary["active_decode"] is False
+    assert summary["logits_from_cache"] is False
+    assert summary["cache_population"] == "embedding_proxy"
 
 
 def test_prefill_mha_hca_csa_builds_expected_cache_state():
@@ -132,6 +136,86 @@ def test_decode_step_shape_updates_cache_and_no_nan(attention_type):
     assert torch.isfinite(out["logits"]).all()
     assert out["cache"].tokens_seen == 1
     assert "cache_summary" in out["aux"]
+
+
+def test_mha_decode_step_active_cache_shape_growth_and_metadata():
+    model = make_model(attention_type="mha")
+    cache = build_inference_cache(model, batch_size=2, device=torch.device("cpu"), dtype=torch.float32)
+    cfg = InferenceConfig(cache_mode="mha_decode", do_sample=False)
+
+    for step in range(3):
+        out = decode_step(model, ids(seq=1), cache, inference_config=cfg, return_aux=True)
+        cache = out["cache"]
+        assert out["logits"].shape == (2, 1, 64)
+        assert cache.tokens_seen == step + 1
+        assert all(layer_cache.k.shape[2] == step + 1 for layer_cache in cache.layer_caches)
+        assert all(layer_cache.v.shape[2] == step + 1 for layer_cache in cache.layer_caches)
+
+    summary = cache.cache_summary()
+    assert summary["cache_mode"] == "mha_decode"
+    assert summary["active_decode"] is True
+    assert summary["logits_from_cache"] is True
+    assert summary["cache_population"] == "active_mha_kv"
+
+
+def test_mha_decode_mode_rejects_non_mha_and_deepseek_decode_raises():
+    hca_model = make_model(attention_type="hca")
+    hca_cache = build_inference_cache(hca_model, batch_size=2, device=torch.device("cpu"), dtype=torch.float32)
+
+    with pytest.raises(NotImplementedError, match="mha_decode"):
+        decode_step(hca_model, ids(seq=1), hca_cache, inference_config=InferenceConfig(cache_mode="mha_decode"))
+
+
+@pytest.mark.parametrize("attention_type", ["hca", "csa"])
+def test_deepseek_decode_step_shape_metadata_and_real_cache(attention_type):
+    model = make_model(attention_type=attention_type)
+    cache = build_inference_cache(model, batch_size=2, device=torch.device("cpu"), dtype=torch.float32)
+    cfg = InferenceConfig(cache_mode="deepseek_decode", do_sample=False)
+
+    out = decode_step(model, ids(seq=1), cache, inference_config=cfg, return_aux=True)
+    summary = out["cache"].cache_summary()
+
+    assert out["logits"].shape == (2, 1, 64)
+    assert torch.isfinite(out["logits"]).all()
+    assert summary["cache_mode"] == "deepseek_decode"
+    assert summary["active_decode"] is True
+    assert summary["logits_from_cache"] is True
+    assert summary["cache_population"] == "layer_projection_real"
+    assert summary["deepseek_active_decode"] is True
+
+
+def test_deepseek_decode_hybrid_csa_hca_moe_mhc_mtp_runs_without_full_forward(monkeypatch):
+    model = make_model(
+        attention_type="hybrid",
+        attention_pattern=("csa", "hca"),
+        ffn_type="moe",
+        use_mhc=True,
+        use_mtp=True,
+        hca_compression_factor=2,
+        compression_factor=2,
+    )
+
+    def forbidden_forward(*args, **kwargs):
+        raise AssertionError("deepseek_decode must not call full forward")
+
+    monkeypatch.setattr(model, "forward", forbidden_forward)
+    out = generate(
+        model,
+        ids(batch=1, seq=4),
+        InferenceConfig(
+            cache_mode="deepseek_decode",
+            max_new_tokens=2,
+            do_sample=False,
+            return_cache_stats=True,
+            use_mtp_draft=True,
+        ),
+    )
+
+    assert out["sequences"].shape == (1, 6)
+    assert out["cache_stats"]["deepseek_active_decode"] is True
+    assert out["cache_stats"]["num_csa_compressed_main_entries"] > 0
+    assert out["cache_stats"]["num_hca_compressed_entries"] > 0
+    assert out["mtp_drafts"][0]["is_speculative_decode"] is False
 
 
 def test_decode_step_with_moe_mhc_and_mtp_enabled():
@@ -178,6 +262,40 @@ def test_generate_greedy_shape_valid_tokens_for_attention_types(attention_type):
     assert int(out["sequences"].max()) < model.config.vocab_size
     assert out["cache_stats"]["cache_memory_mb"] >= 0
     assert out["num_generated_tokens"] == 3
+
+
+def test_generate_mha_decode_mode_runs_from_active_cache():
+    model = make_model(attention_type="mha")
+    prompt = ids(batch=2, seq=4)
+
+    out = generate(
+        model,
+        prompt,
+        InferenceConfig(cache_mode="mha_decode", max_new_tokens=3, do_sample=False, return_cache_stats=True),
+    )
+
+    assert out["sequences"].shape == (2, 7)
+    assert out["cache_stats"]["cache_mode"] == "mha_decode"
+    assert out["cache_stats"]["logits_from_cache"] is True
+    assert out["cache"].tokens_seen == 7
+
+
+@pytest.mark.parametrize("attention_type", ["hca", "csa"])
+def test_generate_deepseek_decode_mode_runs(attention_type):
+    model = make_model(attention_type=attention_type)
+    prompt = ids(batch=2, seq=4)
+
+    out = generate(
+        model,
+        prompt,
+        InferenceConfig(cache_mode="deepseek_decode", max_new_tokens=3, do_sample=False, return_cache_stats=True),
+    )
+
+    assert out["sequences"].shape == (2, 7)
+    assert int(out["sequences"].min()) >= 0
+    assert int(out["sequences"].max()) < model.config.vocab_size
+    assert out["cache_stats"]["cache_mode"] == "deepseek_decode"
+    assert out["cache_stats"]["logits_from_cache"] is True
 
 
 def test_generate_zero_new_tokens_returns_prompt_and_batch_attention_mask():
@@ -244,6 +362,8 @@ def test_generate_complex_csa_moe_mhc_mtp_and_mtp_drafts():
     assert out["sequences"].shape == (1, 6)
     assert out["mtp_drafts"]
     assert out["mtp_drafts"][0]["draft_token_ids"].shape[-1] <= 2
+    assert out["mtp_drafts"][0]["draft_confidence"].shape == out["mtp_drafts"][0]["draft_token_ids"].shape
+    assert out["mtp_drafts"][0]["is_speculative_decode"] is False
     assert int(out["mtp_drafts"][0]["draft_token_ids"].max()) < model.config.vocab_size
 
 
@@ -262,6 +382,22 @@ def test_full_vs_cached_logits_match(attention_type):
 
     assert result["allclose"]
     assert result["max_abs_diff"] <= 1e-5
+
+
+def test_full_vs_active_mha_cached_logits_match():
+    model = make_model(attention_type="mha")
+    prompt = ids(batch=1, seq=5)
+
+    result = compare_full_vs_cached_logits(
+        model,
+        prompt,
+        inference_config=InferenceConfig(cache_mode="mha_decode", do_sample=False),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+    assert result["allclose"]
+    assert result["cache_summary"]["logits_from_cache"] is True
 
 
 def test_inference_autoregresive_and_audit_wrapper_list_prompt():
@@ -286,6 +422,34 @@ def test_inference_autoregresive_and_audit_wrapper_list_prompt():
     assert out["text"] is None
     assert audit["generation"]["sequences"].shape == (1, 4)
     assert audit["full_vs_cached"]["allclose"]
+
+
+def test_audit_wrapper_accepts_text_prompt_with_tokenizer():
+    class TinyTokenizer:
+        def __init__(self):
+            self.vocab = {"hello": 1, "world": 2}
+            self.inv = {1: "hello", 2: "world"}
+
+        def encode(self, text):
+            return [self.vocab.get(part, 1) for part in text.split()]
+
+        def decode(self, ids):
+            return " ".join(self.inv.get(int(i), "<unk>") for i in ids)
+
+    model = make_model(vocab_size=8)
+    tokenizer = TinyTokenizer()
+
+    out = audit_inference_pipeline(
+        model,
+        prompt="hello world",
+        tokenizer=tokenizer,
+        max_new_tokens=1,
+        do_sample=False,
+        compare_logits=True,
+    )
+
+    assert out["input_ids"].shape == (1, 2)
+    assert isinstance(out["text"], str)
 
 
 def test_prepare_input_ids_moves_to_model_device():

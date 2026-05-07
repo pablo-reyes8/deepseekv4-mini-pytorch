@@ -82,3 +82,28 @@ def test_manual_checkpoint_high_level_wrappers_on_cpu():
     assert generated["sequences"].shape == (1, 5)
     assert audit["cache_stats"]["num_layers"] == model.config.n_layers
     assert audit["full_vs_cached"]["allclose"]
+
+
+def test_manual_checkpoint_deepseek_decode_runs_on_cpu_without_full_forward(monkeypatch):
+    model = load_checkpoint_model_cpu()
+
+    def forbidden_forward(*args, **kwargs):
+        raise AssertionError("deepseek_decode must not call full forward")
+
+    monkeypatch.setattr(model, "forward", forbidden_forward)
+    out = generate(
+        model,
+        torch.tensor([[1, 4, 5, 6]], dtype=torch.long),
+        InferenceConfig(
+            cache_mode="deepseek_decode",
+            max_new_tokens=1,
+            do_sample=False,
+            return_cache_stats=True,
+            use_mtp_draft=True,
+        ),
+    )
+
+    assert out["sequences"].shape == (1, 5)
+    assert out["cache_stats"]["deepseek_active_decode"] is True
+    assert out["cache_stats"]["layers_by_cache_type"] == {"CSALayerCache": 2, "HCALayerCache": 2}
+    assert out["mtp_drafts"][0]["draft_confidence"] is not None

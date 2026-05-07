@@ -669,3 +669,242 @@ class CSAAttention(nn.Module):
             return out, aux
 
         return out
+
+    def forward_decode(
+        self,
+        x_t: torch.Tensor,
+        cache,
+        position_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = False,
+    ):
+        if x_t.dim() != 3 or x_t.shape[1] != 1:
+            raise ValueError(f"CSA forward_decode expects x_t [B,1,D], got {tuple(x_t.shape)}")
+
+        B, T, C_model = x_t.shape
+        if C_model != self.d_model:
+            raise ValueError(f"Expected hidden size {self.d_model}, got {C_model}")
+
+        if position_ids is None:
+            position_ids = torch.full(
+                (B, 1),
+                int(cache.tokens_seen),
+                device=x_t.device,
+                dtype=torch.long,
+            )
+        else:
+            position_ids = position_ids.to(device=x_t.device, dtype=torch.long)
+
+        q_latent = self.q_down_proj(x_t)
+        q = self._shape_q(self.q_up_proj(q_latent))
+        index_q = self._shape_index_q(self.index_q_up_proj(q_latent))
+        index_weights = self.index_weight_proj(x_t)
+
+        C_a = self.a_kv_proj(x_t)
+        C_b = self.b_kv_proj(x_t)
+        Z_a = self.a_z_proj(x_t)
+        Z_b = self.b_z_proj(x_t)
+        C_local = self.local_kv_proj(x_t) if self.local_kv_proj is not None else C_a
+
+        I_a = self.a_index_kv_proj(x_t)
+        I_b = self.b_index_kv_proj(x_t)
+        IZ_a = self.a_index_z_proj(x_t)
+        IZ_b = self.b_index_z_proj(x_t)
+
+        if self.rope is not None:
+            q = self.rope(q, position_ids=position_ids, start_pos=0)
+
+        valid_t = (
+            attention_mask[:, -1:].to(device=x_t.device).bool()
+            if attention_mask is not None
+            else torch.ones(B, 1, device=x_t.device, dtype=torch.bool)
+        )
+
+        def real_overlapped_compressor(
+            current_a,
+            previous_b,
+            mask,
+            *,
+            current_z=None,
+            previous_z=None,
+            previous_mask=None,
+            compressor=None,
+        ):
+            compressor = compressor or self.kv_compressor
+            current_z = current_z if current_z is not None else current_a
+            if previous_b is None:
+                tokens = current_a
+                scores = current_z + compressor.bias_a[: current_a.shape[1], :].to(
+                    device=current_a.device,
+                    dtype=current_z.dtype,
+                )[None, :, :]
+                valid = mask
+            else:
+                previous_z = previous_z if previous_z is not None else previous_b
+                a_len = current_a.shape[1]
+                b_len = previous_b.shape[1]
+                a_scores = current_z + compressor.bias_a[:a_len, :].to(
+                    device=current_a.device,
+                    dtype=current_z.dtype,
+                )[None, :, :]
+                b_scores = previous_z + compressor.bias_b[:b_len, :].to(
+                    device=previous_b.device,
+                    dtype=previous_z.dtype,
+                )[None, :, :]
+                tokens = torch.cat([current_a, previous_b], dim=1)
+                scores = torch.cat([a_scores, b_scores], dim=1)
+                valid = None
+                if mask is not None or previous_mask is not None:
+                    if mask is None:
+                        mask = torch.ones(B, a_len, device=x_t.device, dtype=torch.bool)
+                    if previous_mask is None:
+                        previous_mask = torch.ones(B, b_len, device=x_t.device, dtype=torch.bool)
+                    valid = torch.cat([mask, previous_mask.to(device=x_t.device)], dim=1)
+
+            weights, block_valid = compressor._safe_temporal_softmax(scores=scores, valid=valid, dim=1)
+            comp = (weights * tokens).sum(dim=1)
+            return torch.where(block_valid[:, None], comp, torch.zeros_like(comp))
+
+        def main_compressor(current_a, previous_b, mask, **kwargs):
+            return real_overlapped_compressor(
+                current_a,
+                previous_b,
+                mask,
+                compressor=self.kv_compressor,
+                **kwargs,
+            )
+
+        def index_compressor(current_a, previous_b, mask, **kwargs):
+            return real_overlapped_compressor(
+                current_a,
+                previous_b,
+                mask,
+                compressor=self.index_compressor,
+                **kwargs,
+            )
+
+        cache.append_token_state(
+            a_c_t=C_a,
+            b_c_t=C_b,
+            a_z_t=Z_a,
+            b_z_t=Z_b,
+            index_a_c_t=I_a,
+            index_b_c_t=I_b,
+            index_a_z_t=IZ_a,
+            index_b_z_t=IZ_b,
+            position_t=position_ids,
+            valid_mask_t=valid_t,
+        )
+        cache.local_c[:, -1:, :] = C_local
+        cache.flush_ready_blocks(main_compressor=main_compressor, index_compressor=index_compressor)
+
+        if self.rope is not None:
+            q_rope = q
+        else:
+            q_rope = q
+
+        scores_parts = []
+        allowed_parts = []
+        value_parts = []
+        part_names = []
+
+        if self.use_attention_sink:
+            K_sink = self.sink_k.expand(B, -1, -1)
+            scores_sink = torch.einsum("bthd,bsd->bhts", q_rope, K_sink) / math.sqrt(self.head_dim)
+            scores_parts.append(scores_sink)
+            allowed_parts.append(torch.ones(B, self.n_heads, 1, 1, device=x_t.device, dtype=torch.bool))
+            value_parts.append(self.sink_v.expand(B, -1, -1))
+            part_names.append("sink")
+
+        topk_indices = None
+        topk_scores = None
+        topk_mask = None
+        index_scores = None
+        if cache.compressed_main is not None and cache.compressed_main.shape[1] > 0:
+            S = cache.compressed_main.shape[1]
+            raw = torch.einsum("bthi,bsi->bths", index_q, cache.compressed_index)
+            raw = F.relu(raw)
+            index_scores = (index_weights[..., None] * raw).sum(dim=2)
+            allowed_index = cache.compressed_valid_mask[:, None, :].bool()
+            masked_scores = index_scores.masked_fill(~allowed_index, torch.finfo(index_scores.dtype).min)
+            K_eff = min(self.top_k, S)
+            topk_scores, topk_indices = torch.topk(masked_scores, k=K_eff, dim=-1)
+            topk_mask = torch.gather(allowed_index.expand(B, 1, S), dim=-1, index=topk_indices)
+            topk_scores = torch.where(topk_mask, topk_scores, torch.zeros_like(topk_scores))
+
+            K_global_all = cache.compressed_main
+            if self.rope is not None:
+                K_global_rope = K_global_all[:, :, None, :]
+                K_global_rope = self.rope(
+                    K_global_rope,
+                    position_ids=cache.compressed_positions,
+                    start_pos=0,
+                )
+                K_global_all = K_global_rope[:, :, 0, :]
+
+            K_selected = self._gather_selected(K_global_all, topk_indices)
+            V_selected = self._gather_selected(cache.compressed_main, topk_indices)
+            scores_global = torch.einsum("bthd,btkd->bhtk", q_rope, K_selected) / math.sqrt(self.head_dim)
+            if self.use_indexer_score_bias:
+                scores_global = scores_global + topk_scores[:, None, :, :].to(scores_global.dtype)
+            scores_parts.append(scores_global)
+            allowed_parts.append(topk_mask[:, None, :, :].expand(B, self.n_heads, 1, K_eff))
+            value_parts.append(V_selected)
+            part_names.append("global")
+
+        if cache.local_c is not None and cache.local_c.shape[1] > 0:
+            K_local = cache.local_c
+            if self.rope is not None:
+                K_local_rope = K_local[:, :, None, :]
+                K_local_rope = self.rope(
+                    K_local_rope,
+                    position_ids=cache.local_positions,
+                    start_pos=0,
+                )
+                K_local = K_local_rope[:, :, 0, :]
+            scores_local = torch.einsum("bthd,bsd->bhts", q_rope, K_local) / math.sqrt(self.head_dim)
+            scores_parts.append(scores_local)
+            allowed_parts.append(cache.local_valid_mask[:, None, None, :].expand(B, self.n_heads, 1, cache.local_c.shape[1]))
+            value_parts.append(cache.local_c)
+            part_names.append("local")
+
+        scores = torch.cat(scores_parts, dim=-1)
+        allowed = torch.cat(allowed_parts, dim=-1)
+        weights = safe_masked_softmax(scores=scores, allowed_mask=allowed, dim=-1)
+        weights = self.attention_dropout(weights)
+
+        context = torch.zeros(B, self.n_heads, 1, self.head_dim, device=x_t.device, dtype=x_t.dtype)
+        offset = 0
+        aux = {}
+        for name, values in zip(part_names, value_parts):
+            if name == "global":
+                width = values.shape[2]
+                part_weights = weights[..., offset : offset + width]
+                context = context + torch.einsum("bhtk,btkd->bhtd", part_weights, values)
+            else:
+                width = values.shape[1]
+                part_weights = weights[..., offset : offset + width]
+                context = context + torch.einsum("bhts,bsd->bhtd", part_weights, values)
+            if need_weights:
+                aux[f"{name}_attn_weights"] = part_weights
+            offset += width
+
+        context = context.transpose(1, 2).contiguous()
+        if self.use_grouped_output_projection:
+            out = self.out_proj(context)
+        else:
+            out = self.out_proj(context.view(B, T, self.inner_dim))
+        out = self.residual_dropout(out)
+
+        if need_weights:
+            aux.update(
+                {
+                    "topk_indices": topk_indices,
+                    "topk_scores": topk_scores,
+                    "topk_mask": topk_mask,
+                    "compressed_valid_mask": cache.compressed_valid_mask,
+                    "compressed_position_ids": cache.compressed_positions,
+                    "index_scores": index_scores,
+                }
+            )
+        return out, cache, aux

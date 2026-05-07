@@ -29,6 +29,11 @@ def test_valid_inference_config_builds():
     assert cfg.cache_dtype == "bf16"
 
 
+def test_valid_cache_modes():
+    for mode in ["audit", "mha_decode", "deepseek_decode"]:
+        InferenceConfig(cache_mode=mode).validate()
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -39,8 +44,11 @@ def test_valid_inference_config_builds():
         ({"top_p": 0.0}, "top_p"),
         ({"top_p": 1.1}, "top_p"),
         ({"cache_dtype": "fp8"}, "cache_dtype"),
+        ({"cache_mode": "bad"}, "cache_mode"),
         ({"mtp_accept_mode": "sample"}, "mtp_accept_mode"),
         ({"repetition_penalty": 0.0}, "repetition_penalty"),
+        ({"deepseek_prefill_mode": "bad"}, "deepseek_prefill_mode"),
+        ({"deepseek_cache_population": "fake"}, "deepseek_cache_population"),
         ({"local_window_size": 0}, "local_window_size"),
         ({"max_cache_length": 0}, "max_cache_length"),
     ],

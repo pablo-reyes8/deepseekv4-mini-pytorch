@@ -422,3 +422,103 @@ class DeepSeekV4Block(nn.Module):
             return X, aux
 
         return X
+
+    def forward_decode(
+        self,
+        x_t: torch.Tensor,
+        layer_cache,
+        attention_mask_t: Optional[torch.Tensor] = None,
+        position_ids_t: Optional[torch.Tensor] = None,
+        input_ids_t: Optional[torch.Tensor] = None,
+        return_aux: bool = False,
+    ):
+        if not hasattr(self.attention, "forward_decode"):
+            raise NotImplementedError(
+                f"Attention module {type(self.attention).__name__} does not implement forward_decode."
+            )
+
+        aux: Dict[str, Any] = {}
+
+        if self.use_mhc:
+            X_t = x_t
+            if X_t.dim() != 4 or X_t.shape[1] != 1:
+                raise ValueError(f"mHC forward_decode expects X_t [B,1,n_hc,D], got {tuple(X_t.shape)}")
+
+            attn_aux_holder: Dict[str, Any] = {}
+            layer_cache_holder = {"cache": layer_cache}
+
+            def attn_sublayer(x_sub: torch.Tensor) -> torch.Tensor:
+                x_norm = self.norm1(x_sub)
+                attn_out, new_cache, attn_aux = self.attention.forward_decode(
+                    x_norm,
+                    cache=layer_cache_holder["cache"],
+                    position_ids=position_ids_t,
+                    attention_mask=attention_mask_t,
+                    need_weights=return_aux,
+                )
+                layer_cache_holder["cache"] = new_cache
+                if attn_aux:
+                    attn_aux_holder["attention"] = attn_aux
+                return attn_out
+
+            X_t, mhc_attn_aux = self._mhc_update(
+                mhc=self.mhc_attn,
+                X=X_t,
+                sublayer_fn=attn_sublayer,
+            )
+            aux["mhc_attn"] = mhc_attn_aux
+            if "attention" in attn_aux_holder:
+                aux["attention"] = attn_aux_holder["attention"]
+
+            ffn_aux_holder: Dict[str, Any] = {}
+
+            def ffn_sublayer(x_sub: torch.Tensor) -> torch.Tensor:
+                x_norm = self.norm2(x_sub)
+                ffn_out, ffn_aux = self._call_ffn(
+                    x_norm=x_norm,
+                    input_ids=input_ids_t,
+                    collect_aux=return_aux or self.ffn_type == "moe",
+                )
+                if ffn_aux is not None:
+                    ffn_aux_holder["moe"] = ffn_aux
+                return ffn_out
+
+            X_t, mhc_ffn_aux = self._mhc_update(
+                mhc=self.mhc_ffn,
+                X=X_t,
+                sublayer_fn=ffn_sublayer,
+            )
+            aux["mhc_ffn"] = mhc_ffn_aux
+            if "moe" in ffn_aux_holder:
+                aux["moe"] = ffn_aux_holder["moe"]
+
+            return X_t, layer_cache_holder["cache"], aux
+
+        if x_t.dim() != 3 or x_t.shape[1] != 1:
+            raise ValueError(f"forward_decode expects x_t [B,1,D], got {tuple(x_t.shape)}")
+
+        residual = x_t
+        x_norm = self.norm1(x_t)
+        attn_out, layer_cache, attn_aux = self.attention.forward_decode(
+            x_norm,
+            cache=layer_cache,
+            position_ids=position_ids_t,
+            attention_mask=attention_mask_t,
+            need_weights=return_aux,
+        )
+        x_t = residual + attn_out
+        if attn_aux:
+            aux["attention"] = attn_aux
+
+        residual = x_t
+        x_norm = self.norm2(x_t)
+        ffn_out, ffn_aux = self._call_ffn(
+            x_norm=x_norm,
+            input_ids=input_ids_t,
+            collect_aux=return_aux or self.ffn_type == "moe",
+        )
+        x_t = residual + ffn_out
+        if ffn_aux is not None:
+            aux["moe"] = ffn_aux
+
+        return x_t, layer_cache, aux

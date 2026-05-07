@@ -26,7 +26,13 @@ Implemented in this pass:
 - High-level `inference_autoregresive(...)` wrapper.
 - Notebook/debug audit wrapper: `audit_inference_pipeline(...)`.
 
-The current decode path keeps generation behavior correct by using full-context recomputation while maintaining explicit cache state for inspection and future cache-aware attention integration. The attention modules can later add native `forward_decode(...)` methods without changing the public inference API.
+Inference has explicit cache modes:
+
+- `cache_mode="audit"` keeps generation exact with full-forward logits while maintaining HCA/CSA/MHA shadow caches for inspection.
+- `cache_mode="mha_decode"` uses active MHA KV-cache decode. This is for pure `attention_type="mha"` models.
+- `cache_mode="deepseek_decode"` uses active HCA/CSA compressed-cache decode for HCA, CSA, and hybrid HCA/CSA models. It supports mHC, MoE, and MTP diagnostics.
+
+In `deepseek_decode`, logits come from cached states. The path updates real layer-projection cache states, compresses ready HCA/CSA blocks, keeps local windows and pending tails, and avoids full-sequence recomputation.
 
 ## Files
 
@@ -75,7 +81,8 @@ from inference import audit_inference_pipeline
 
 audit = audit_inference_pipeline(
     model,
-    prompt=[1, 2, 3, 4],
+    prompt="key key_1 is value_4 question what is key_1 ? answer :",
+    tokenizer=tokenizer,
     max_new_tokens=8,
     do_sample=False,
     compare_logits=True,
@@ -98,10 +105,9 @@ from inference import inference_autoregressive
 from inference import InferenceConfig, generate
 
 cfg = InferenceConfig(
+    cache_mode="deepseek_decode",
     max_new_tokens=64,
-    do_sample=True,
-    temperature=0.8,
-    top_p=0.95,
+    do_sample=False,
     return_cache_stats=True,
 )
 
@@ -110,9 +116,10 @@ out = generate(model, input_ids=input_ids, inference_config=cfg)
 
 ## Current Limitation
 
-Native attention-level cached decode is intentionally not wired yet because that requires adding `forward_decode(...)` methods to the existing attention/block modules. This folder still models the target cache structures now, so the future change is localized:
+The active DeepSeek path is research-code scale, not production serving infrastructure. It intentionally does not implement:
 
-- `MHA.forward_decode(...)` can use `MHACache`.
-- `HCA.forward_decode(...)` can use `HCALayerCache`.
-- `CSA.forward_decode(...)` can use `CSALayerCache`.
-- Block/model decode can then replace full-context recomputation behind the same public API.
+- custom CUDA kernels,
+- paged attention,
+- disk-backed KV cache,
+- quantized FP4/FP8 KV storage,
+- distributed serving.

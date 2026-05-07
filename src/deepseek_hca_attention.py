@@ -673,3 +673,135 @@ class HCAAttention(nn.Module):
             return out, aux
 
         return out
+
+    def forward_decode(
+        self,
+        x_t: torch.Tensor,
+        cache,
+        position_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = False,
+    ):
+        if x_t.dim() != 3 or x_t.shape[1] != 1:
+            raise ValueError(f"HCA forward_decode expects x_t [B,1,D], got {tuple(x_t.shape)}")
+
+        B, T, C_model = x_t.shape
+        if C_model != self.d_model:
+            raise ValueError(f"Expected hidden size {self.d_model}, got {C_model}")
+
+        q = self._shape_q(self.q_proj(x_t))
+        C = self.kv_proj(x_t)
+        Z = self.z_proj(x_t)
+
+        if position_ids is None:
+            position_ids = torch.full(
+                (B, 1),
+                int(cache.tokens_seen),
+                device=x_t.device,
+                dtype=torch.long,
+            )
+        else:
+            position_ids = position_ids.to(device=x_t.device, dtype=torch.long)
+
+        if self.rope is not None:
+            q = self.rope(q, position_ids=position_ids, start_pos=0)
+
+        valid_t = (
+            attention_mask[:, -1:].to(device=x_t.device).bool()
+            if attention_mask is not None
+            else torch.ones(B, 1, device=x_t.device, dtype=torch.bool)
+        )
+
+        def real_compressor(c_block, z_block, mask_block=None):
+            compressed, _, _ = self.compressor(
+                C=c_block,
+                Z=z_block,
+                attention_mask=mask_block,
+                start_pos=0,
+            )
+            return compressed[:, 0, :]
+
+        cache.append_token_state(C, Z, position_ids, valid_t)
+        cache.flush_ready_blocks(compressor=real_compressor)
+
+        q = q.transpose(1, 2)  # [B,H,1,Dh]
+        scores_parts = []
+        allowed_parts = []
+        value_parts = []
+        part_names = []
+
+        if self.use_attention_sink:
+            K_sink = self.sink_k.expand(B, -1, -1)
+            scores_sink = torch.einsum("bhtd,bsd->bhts", q, K_sink) / math.sqrt(self.head_dim)
+            scores_parts.append(scores_sink)
+            allowed_parts.append(torch.ones(B, self.n_heads, 1, 1, device=x_t.device, dtype=torch.bool))
+            value_parts.append(self.sink_v.expand(B, -1, -1))
+            part_names.append("sink")
+
+        if cache.compressed_kv is not None and cache.compressed_kv.shape[1] > 0:
+            K_global = cache.compressed_kv
+            if self.rope is not None:
+                K_global_rope = K_global[:, :, None, :]
+                K_global_rope = self.rope(
+                    K_global_rope,
+                    position_ids=cache.compressed_positions,
+                    start_pos=0,
+                )
+                K_global = K_global_rope[:, :, 0, :]
+
+            scores_global = torch.einsum("bhtd,bsd->bhts", q, K_global) / math.sqrt(self.head_dim)
+            allowed_global = cache.compressed_valid_mask[:, None, None, :].expand(
+                B, self.n_heads, 1, cache.compressed_kv.shape[1]
+            )
+            scores_parts.append(scores_global)
+            allowed_parts.append(allowed_global)
+            value_parts.append(cache.compressed_kv)
+            part_names.append("global")
+
+        if cache.local_c is not None and cache.local_c.shape[1] > 0:
+            K_local = cache.local_c
+            if self.rope is not None:
+                K_local_rope = K_local[:, :, None, :]
+                K_local_rope = self.rope(
+                    K_local_rope,
+                    position_ids=cache.local_positions,
+                    start_pos=0,
+                )
+                K_local = K_local_rope[:, :, 0, :]
+
+            scores_local = torch.einsum("bhtd,bsd->bhts", q, K_local) / math.sqrt(self.head_dim)
+            allowed_local = cache.local_valid_mask[:, None, None, :].expand(
+                B, self.n_heads, 1, cache.local_c.shape[1]
+            )
+            scores_parts.append(scores_local)
+            allowed_parts.append(allowed_local)
+            value_parts.append(cache.local_c)
+            part_names.append("local")
+
+        scores = torch.cat(scores_parts, dim=-1)
+        allowed = torch.cat(allowed_parts, dim=-1)
+        weights = self._safe_concat_softmax(scores=scores, allowed_mask=allowed, dim=-1)
+        weights = self.attention_dropout(weights)
+
+        context = torch.zeros(B, self.n_heads, 1, self.head_dim, device=x_t.device, dtype=x_t.dtype)
+        offset = 0
+        aux = {}
+        for name, values in zip(part_names, value_parts):
+            width = values.shape[1]
+            part_weights = weights[..., offset : offset + width]
+            context = context + torch.einsum("bhts,bsd->bhtd", part_weights, values)
+            if need_weights:
+                aux[f"{name}_attn_weights"] = part_weights
+            offset += width
+
+        context = context.transpose(1, 2).contiguous()
+        if self.use_grouped_output_projection:
+            out = self.out_proj(context)
+        else:
+            out = self.out_proj(context.view(B, T, self.inner_dim))
+        out = self.residual_dropout(out)
+
+        if need_weights:
+            aux["compressed_valid_mask"] = cache.compressed_valid_mask
+            aux["compressed_position_ids"] = cache.compressed_positions
+        return out, cache, aux

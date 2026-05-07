@@ -574,3 +574,94 @@ class DeepSeekV4LM(nn.Module):
             "moe_aux_loss": moe_aux_loss,
             "hidden_states": hidden_states if return_aux else None,
             "aux": aux}
+
+    def forward_decode(
+        self,
+        input_ids_t: torch.Tensor,
+        cache,
+        position_ids_t: Optional[torch.Tensor] = None,
+        attention_mask_t: Optional[torch.Tensor] = None,
+        return_aux: bool = False,
+    ) -> Dict[str, Any]:
+        if input_ids_t.dim() != 2 or input_ids_t.shape[1] != 1:
+            raise ValueError(f"input_ids_t must have shape [B,1], got {tuple(input_ids_t.shape)}")
+
+        input_ids_t = input_ids_t.to(device=cache.device, dtype=torch.long)
+        B, _ = input_ids_t.shape
+        if B != cache.batch_size:
+            raise ValueError(f"cache batch_size={cache.batch_size} does not match input batch size {B}")
+
+        if position_ids_t is None:
+            position_ids_t = torch.full(
+                (B, 1),
+                int(cache.tokens_seen),
+                device=cache.device,
+                dtype=torch.long,
+            )
+        else:
+            position_ids_t = position_ids_t.to(device=cache.device, dtype=torch.long)
+
+        if attention_mask_t is None:
+            if self.pad_token_id is None:
+                attention_mask_t = torch.ones(B, 1, device=cache.device, dtype=torch.long)
+            else:
+                attention_mask_t = input_ids_t.ne(int(self.pad_token_id)).long()
+        else:
+            attention_mask_t = attention_mask_t.to(device=cache.device)
+
+        full_attention_mask = (
+            attention_mask_t
+            if cache.attention_mask is None
+            else torch.cat([cache.attention_mask.to(device=cache.device), attention_mask_t], dim=1)
+        )
+
+        x_t = self.embedding(input_ids_t)
+        if self.use_mhc:
+            x_or_X = expand_residual_stream(
+                x_t,
+                n_hc=self.config.n_hc,
+                mode=self.config.mhc_expand_mode,
+            )
+        else:
+            x_or_X = x_t
+        block_aux_list = []
+
+        for layer_idx, block in enumerate(self.blocks):
+            x_or_X, new_layer_cache, block_aux = block.forward_decode(
+                x_or_X,
+                layer_cache=cache.layer_caches[layer_idx],
+                attention_mask_t=full_attention_mask,
+                position_ids_t=position_ids_t,
+                input_ids_t=input_ids_t,
+                return_aux=return_aux,
+            )
+            cache.layer_caches[layer_idx] = new_layer_cache
+            if return_aux or self.config.ffn_type == "moe":
+                block_aux_list.append(block_aux)
+
+        if self.use_mhc:
+            if self.config.mhc_collapse_mode == "readout":
+                x_t = self.mhc_readout(x_or_X)
+            else:
+                x_t = collapse_residual_stream(
+                    x_or_X,
+                    mode=self.config.mhc_collapse_mode,
+                )
+        else:
+            x_t = x_or_X
+
+        hidden_states = self.final_norm(x_t)
+        logits = self.lm_head(hidden_states)
+        cache.append_input_ids(input_ids_t, attention_mask_t)
+
+        aux: Dict[str, Any] = {}
+        if return_aux:
+            aux["blocks"] = block_aux_list
+            aux["cache_summary"] = cache.cache_summary()
+
+        return {
+            "logits": logits,
+            "hidden_states": hidden_states if return_aux else None,
+            "cache": cache,
+            "aux": aux,
+        }

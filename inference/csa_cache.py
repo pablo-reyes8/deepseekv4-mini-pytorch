@@ -12,6 +12,7 @@ def default_csa_compressor(
     current_a: torch.Tensor,
     previous_b: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
+    **_: object,
 ) -> torch.Tensor:
     weights = torch.ones_like(current_a[..., :1])
     if mask is not None:
@@ -109,10 +110,10 @@ class CSALayerCache:
     def flush_ready_blocks(
         self,
         main_compressor: Optional[
-            Callable[[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]], torch.Tensor]
+            Callable[..., torch.Tensor]
         ] = None,
         index_compressor: Optional[
-            Callable[[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]], torch.Tensor]
+            Callable[..., torch.Tensor]
         ] = None,
     ) -> "CSALayerCache":
         if self.pending_a_c is None:
@@ -127,11 +128,19 @@ class CSALayerCache:
                 self.pending_a_c[:, :m],
                 self.previous_b_c,
                 mask_block,
+                current_z=self.pending_a_z[:, :m] if self.pending_a_z is not None else None,
+                previous_z=self.previous_b_z,
+                previous_mask=self.previous_mask,
             ).unsqueeze(1)
             index = index_compressor(
                 self.pending_index_a_c[:, :m],
                 self.previous_index_b_c,
                 mask_block,
+                current_z=(
+                    self.pending_index_a_z[:, :m] if self.pending_index_a_z is not None else None
+                ),
+                previous_z=self.previous_index_b_z,
+                previous_mask=self.previous_mask,
             ).unsqueeze(1)
 
             self.compressed_main = concat_optional(self.compressed_main, main, dim=1)

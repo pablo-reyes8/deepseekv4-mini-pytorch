@@ -49,6 +49,20 @@ class HFTextDatasetPreset:
     notes: str
 
 
+@dataclass(frozen=True)
+class TextDataloaderConfig:
+    preset_name: str = "wikitext2"
+    block_size: Optional[int] = None
+    batch_size: int = 8
+    num_workers: int = 0
+    tokenizer_path: Optional[str | Path] = None
+    vocab_size: int = 16_000
+    min_frequency: int = 2
+    max_tokenizer_documents: Optional[int] = 50_000
+    max_train_documents: Optional[int] = 20_000
+    max_validation_documents: Optional[int] = 2_000
+
+
 HF_TEXT_DATASETS: Dict[str, HFTextDatasetPreset] = {
     "wikitext2": HFTextDatasetPreset(
         name="wikitext2",
@@ -333,6 +347,33 @@ def create_hf_text_dataloaders(
     )
 
     return train_loader, val_loader, tokenizer
+
+
+def create_text_dataloaders(
+    cfg: TextDataloaderConfig,
+    *,
+    use_mtp: bool = False,
+) -> Tuple[DataLoader, Optional[DataLoader], "Tokenizer"]:
+    """Uniform HF text dataloader entrypoint.
+
+    This mirrors ``create_synthetic_retrieval_dataloaders(cfg=..., use_mtp=...)``
+    for notebook ergonomics. The causal text batches already return shifted
+    ``labels``; when ``use_mtp=True`` the model can derive MTP labels internally
+    from those labels, so the dataloader output stays the same.
+    """
+    del use_mtp
+    return create_hf_text_dataloaders(
+        cfg.preset_name,
+        block_size=cfg.block_size,
+        batch_size=cfg.batch_size,
+        num_workers=cfg.num_workers,
+        tokenizer_path=cfg.tokenizer_path,
+        vocab_size=cfg.vocab_size,
+        min_frequency=cfg.min_frequency,
+        max_tokenizer_documents=cfg.max_tokenizer_documents,
+        max_train_documents=cfg.max_train_documents,
+        max_validation_documents=cfg.max_validation_documents,
+    )
 
 
 def available_hf_text_dataset_presets() -> Sequence[str]:

@@ -26,7 +26,8 @@ checkpoints/
 runs/
 wandb/
 mlruns/
-outputs/
+outputs/*
+!outputs/inference_monolith.py
 artifacts/
 *.pt
 *.pth
@@ -50,4 +51,3 @@ data/cache/
 .DS_Store
 Thumbs.db
 proyect_structure/
-

@@ -20,6 +20,18 @@ from inference.inference_config import InferenceConfig
 from inference.mha_cache import MHACache
 
 
+def configure_cache_metadata(cache: DeepSeekV4InferenceCache, cfg: InferenceConfig) -> None:
+    cache.metadata["cache_mode"] = cfg.cache_mode
+    cache.metadata["active_decode"] = cfg.cache_mode in {"mha_decode", "deepseek_decode"}
+    cache.metadata["logits_from_cache"] = cfg.cache_mode in {"mha_decode", "deepseek_decode"}
+    if cfg.cache_mode == "mha_decode":
+        cache.metadata["cache_population"] = "active_mha_kv"
+    elif cfg.cache_mode == "deepseek_decode":
+        cache.metadata["cache_population"] = cfg.deepseek_cache_population
+    else:
+        cache.metadata["cache_population"] = "embedding_proxy"
+
+
 def _layer_hidden_for_cache(
     model: torch.nn.Module,
     input_ids_t: torch.Tensor,
@@ -43,6 +55,7 @@ def update_cache_with_token(
 ) -> DeepSeekV4InferenceCache:
     cfg = inference_config or InferenceConfig()
     cfg.validate()
+    configure_cache_metadata(cache, cfg)
 
     input_ids_t = input_ids_t.to(device=cache.device, dtype=torch.long)
     if input_ids_t.dim() != 2 or input_ids_t.shape[1] != 1:
@@ -134,23 +147,36 @@ def decode_step(
     cfg = inference_config or InferenceConfig()
     cfg.validate()
 
-    update_cache_with_token(
-        model,
-        input_ids_t=input_ids_t,
-        cache=cache,
-        position_ids_t=position_ids_t,
-        inference_config=cfg,
-    )
+    if cache is None:
+        raise ValueError("decode_step requires a DeepSeekV4InferenceCache instance.")
 
-    if not cfg.fallback_to_full_forward:
-        raise NotImplementedError(
-            "Cached decode through attention.forward_decode is not wired yet. "
-            "Set fallback_to_full_forward=True for v1 generation."
+    if cfg.cache_mode in {"mha_decode", "deepseek_decode"}:
+        model_cfg = getattr(model, "config", None)
+        if cfg.cache_mode == "mha_decode" and getattr(model_cfg, "attention_type", None) != "mha":
+            raise NotImplementedError("cache_mode='mha_decode' only supports attention_type='mha'.")
+        if not hasattr(model, "forward_decode"):
+            raise NotImplementedError("Model does not expose forward_decode for active cached decoding.")
+
+        configure_cache_metadata(cache, cfg)
+        decoded = model.forward_decode(
+            input_ids_t=input_ids_t,
+            cache=cache,
+            position_ids_t=position_ids_t,
+            attention_mask_t=None,
+            return_aux=return_aux,
         )
+    else:
+        update_cache_with_token(
+            model,
+            input_ids_t=input_ids_t,
+            cache=cache,
+            position_ids_t=position_ids_t,
+            inference_config=cfg,
+        )
+        decoded = _full_forward_decode(model, cache, return_aux=return_aux)
+        decoded["cache"] = cache
+        decoded["aux"] = decoded.get("aux", {})
 
-    decoded = _full_forward_decode(model, cache, return_aux=return_aux)
-    decoded["cache"] = cache
-    decoded["aux"] = decoded.get("aux", {})
     if return_aux:
         decoded["aux"]["cache_summary"] = cache.cache_summary()
     return decoded
