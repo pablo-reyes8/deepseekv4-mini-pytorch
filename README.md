@@ -583,3 +583,10 @@ If you use this implementation or adapt its modules for your research, please co
   howpublished = {\url{https://github.com/pablo-reyes8/deepseek-v4-mini-pytorch}}
 }
 ```
+
+## License
+
+This project is licensed under the **MIT License**.  
+See the [LICENSE](LICENSE) file for the full legal text.
+
+Copyright (c) 2026 Pablo Reyes.
